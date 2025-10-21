@@ -1357,6 +1357,34 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     }
   }
 
+  // Pagination navigation for cart items
+  if (session.data && session.data.cartPagination) {
+    const { currentPage, totalPages, pageSize } = session.data.cartPagination;
+    const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+    if (targetPage) {
+      try {
+        const userId = session.data.userId;
+        const result = await require('./services/orderManagement').getCartPaginated(userId, { page: targetPage, pageSize });
+        session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+        session.set('data', session.data);
+        await session.save();
+
+        let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+        result.items.forEach((item, idx) => {
+          msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+        });
+        msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+        msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+        msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
+        return;
+      } catch (err) {
+        console.error('Cart pagination error:', err);
+      }
+    }
+  }
+
   // Check if waiting for OTP verification during registration
   // This must bypass NLP to prevent dynamic OTP codes from being misinterpreted
   if (session.state === 'REGISTERING' || (session.data && session.data.waitingForOTPVerification)) {
