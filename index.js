@@ -1812,7 +1812,9 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
 
     let message = `Here are some products matching "${parameters.product}":\n\n`;
 
-    products.slice(0, 5).forEach((product, index) => {
+    const pageSize = 5;
+    const paginatedResults = products.slice(0, pageSize);
+    paginatedResults.forEach((product, index) => {
       message += `${index + 1}. ${product.name}\n`;
       message += `   Price: ₦${product.price}\n`;
       message += `   Category: ${product.category}\n`;
@@ -1822,8 +1824,14 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
 
     message += `To add a product to your cart, reply with "add [product number] [quantity]"\nExample: "add 1 2" to add 2 units of the first product.`;
 
-    // Save search results in session for reference
-    session.data.searchResults = products.slice(0, 5);
+    // Save search results and pagination state for Next/Previous support
+    session.data.searchResults = paginatedResults;
+    session.data.productPagination = {
+      currentPage: 1,
+      totalPages: Math.max(1, Math.ceil(products.length / pageSize)),
+      pageSize: pageSize
+    };
+    session.data.productPageItems = paginatedResults;
     session.set('data', session.data);
     await session.save();
 
