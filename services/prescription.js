@@ -418,6 +418,7 @@ const terminateOCRWorker = async () => {
 
 module.exports = {
   extractPrescriptionText,
+  extractPrescriptionFromBuffer,
   parsePrescriptionText,
   savePrescription,
   uploadAndSavePrescription,
@@ -425,6 +426,7 @@ module.exports = {
   verifyPrescription,
   getPendingPrescriptions,
   getPendingPrescriptionsPaginated,
+  getPendingPrescriptionsForPharmacist,
   terminateOCRWorker,
   initializeOCRWorker
 };
