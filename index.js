@@ -1876,24 +1876,28 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
     }
 
     if (!parameters.productIndex || !parameters.quantity) {
-      const msg = formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your search results.", isLoggedIn);
+      const msg = formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your list.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const productIndex = parseInt(parameters.productIndex) - 1;
-    const quantity = parseInt(parameters.quantity);
+    const productIndex = parseInt(parameters.productIndex, 10) - 1;
+    const quantity = parseInt(parameters.quantity, 10);
 
-    if (!session.data.searchResults || !session.data.searchResults[productIndex]) {
-      const msg = formatResponseWithOptions("Please search for products first before adding to cart.", isLoggedIn);
+    const candidates = (session.data.searchResults || [])
+      .concat(session.data.productPageItems || [])
+      .concat(session.data.healthcareProductPageItems || []);
+
+    if (!candidates[productIndex]) {
+      const msg = formatResponseWithOptions("Please list products first (e.g., 'search medicines' or 'browse health products'), then use 'add [number] [qty]'.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const product = session.data.searchResults[productIndex];
-    const result = await addToCart(session.data.userId, product.id, quantity);
+    const product = candidates[productIndex];
+    await addToCart(session.data.userId, product.id, quantity);
 
-    const successMsg = formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout' to place your order.`, isLoggedIn);
+    const successMsg = formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout [address] [flutterwave|paystack|cash]' to place your order.`, isLoggedIn);
     await sendWhatsAppMessage(phoneNumber, successMsg);
   } catch (error) {
     console.error('Error adding to cart:', error);
