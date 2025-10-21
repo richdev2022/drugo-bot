@@ -1371,6 +1371,15 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         }
         break;
 
+      case 'view_cart':
+        console.log(`🧺 Handling view cart`);
+        if (!isLoggedIn) {
+          await sendAuthRequiredMessage(phoneNumber);
+        } else {
+          await handleViewCart(phoneNumber, session, parameters);
+        }
+        break;
+
       case 'place_order':
         console.log(`📦 Handling place order`);
         if (!isLoggedIn) {
@@ -1378,6 +1387,11 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         } else {
           await handlePlaceOrder(phoneNumber, session, parameters);
         }
+        break;
+
+      case 'prescription_upload':
+        console.log(`📄 Handling prescription upload prompt`);
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Please upload your prescription document (image or PDF) by sending it as an attachment. You can caption it with your Order ID, e.g., rx 12345.', isLoggedIn));
         break;
 
       case 'track_order':
