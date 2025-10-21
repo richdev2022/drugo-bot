@@ -77,9 +77,9 @@ const FEATURE_COMMANDS = {
   '2': { intent: 'search_doctors', label: 'Find Doctors' },
   '3': { intent: 'track_order', label: 'Track Orders' },
   '4': { intent: 'book_appointment', label: 'Book Appointment' },
-  '5': { intent: 'place_order', label: 'Place Order' },
+  '5': { intent: 'view_cart', label: 'View Cart' },
   '6': { intent: 'support', label: 'Customer Support' },
-  '7': { intent: 'diagnostic_tests', label: 'Book Diagnostic Tests' },
+  '7': { intent: 'prescription_upload', label: 'Upload Prescription' },
   '8': { intent: 'healthcare_products', label: 'Browse Healthcare Products' }
 };
 
@@ -89,9 +89,9 @@ const HELP_MESSAGE = `🏥 *Drugs.ng WhatsApp Bot - Available Services:*
 2️⃣ *Find Doctors* - Type "2" or "find a cardiologist"
 3️⃣ *Track Orders* - Type "3" or "track 12345"
 4️⃣ *Book Appointment* - Type "4" or "book a doctor"
-5️⃣ *Place Order* - Type "5" or "order medicines"
+5️⃣ *View Cart* - Type "5" or "cart"
 6️⃣ *Customer Support* - Type "6" or "connect me to support"
-7️⃣ *Book Diagnostic Tests* - Type "7" or "book a blood test"
+7️⃣ *Upload Prescription* - Type "7" or "upload prescription"
 8️⃣ *Healthcare Products* - Type "8" or "browse health products"
 
 Simply reply with a number (1-8) or describe what you need!`;
@@ -150,13 +150,12 @@ const processMessage = async (message, phoneNumber, session) => {
     }
 
     // Add to cart intents
-    if (/^(add|put|move).*?(cart|basket)/.test(lowerMessage)) {
+    if (/^(add|put|move).*?(cart|basket)/.test(lowerMessage) || /^(add)\s+\d+(?:\s+\d+)?$/.test(lowerMessage)) {
       return handleAddToCartIntent(message);
     }
 
     // Order/Checkout intents
-    if (/^(order|checkout|place order|buy|purchase|proceed to|complete|confirm order)/.test(lowerMessage) ||
-        lowerMessage === '5') {
+    if (/^(order|checkout|place order|buy|purchase|proceed to|complete|confirm order)/.test(lowerMessage)) {
       return handlePlaceOrderIntent(message);
     }
 
@@ -184,6 +183,11 @@ const processMessage = async (message, phoneNumber, session) => {
       return handlePaymentIntent(message);
     }
 
+    // View cart intents
+    if (/^(cart|view cart|show cart|my cart)$/.test(lowerMessage) || lowerMessage === '5') {
+      return createResponse('view_cart', {}, 'Showing your cart...');
+    }
+
     // Support/Chat intents
     if (/^(support|agent|help me|speak to|chat with|contact|complaint|issue|problem|help|talk to agent)/.test(lowerMessage) ||
         lowerMessage === '6') {
@@ -191,8 +195,7 @@ const processMessage = async (message, phoneNumber, session) => {
     }
 
     // Diagnostic tests intents
-    if (/^(diagnostic|test|blood test|lab test|screening|check up|medical test)/.test(lowerMessage) ||
-        lowerMessage === '7') {
+    if (/^(diagnostic|test|blood test|lab test|screening|check up|medical test)/.test(lowerMessage)) {
       return handleDiagnosticTestIntent(message);
     }
 
@@ -208,7 +211,7 @@ const processMessage = async (message, phoneNumber, session) => {
     }
 
     // Prescription upload intents
-    if (/^(upload|prescription|script|rx|medicine prescription)/.test(lowerMessage)) {
+    if (/^(upload|prescription|script|rx|medicine prescription)/.test(lowerMessage) || lowerMessage === '7') {
       return createResponse('prescription_upload', {}, 'Please upload your prescription document (image or PDF) by sending it as an attachment.');
     }
 
@@ -234,6 +237,7 @@ const createResponse = (intent, parameters = {}, fulfillmentText = null, source 
     search_products: "What medicine or product are you looking for?",
     add_to_cart: 'Please specify the product number and quantity.\n\nExample: add 1 2 (adds 2 units of product 1)',
     place_order: 'I can help you place an order. Please provide your delivery address and payment method.',
+    view_cart: 'Showing your cart...',
     track_order: 'Please provide your order ID to track it.\n\nExample: track 12345 (or send part of your payment reference like drugsng-12345-... or caption: rx 12345)',
     search_doctors: 'What type of doctor are you looking for? (e.g., cardiologist, pediatrician)',
     book_appointment: 'I can help you book an appointment. Please provide the doctor and your preferred date and time.',
