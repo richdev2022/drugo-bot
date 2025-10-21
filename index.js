@@ -1274,6 +1274,61 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     }
   }
 
+  // Pagination navigation for specialties list
+  if (session.data && session.data.doctorSpecialtyPagination) {
+    const { currentPage, totalPages, pageSize } = session.data.doctorSpecialtyPagination;
+    const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+    const isLoggedIn = isAuthenticatedSession(session);
+
+    if (targetPage) {
+      const start = (targetPage - 1) * pageSize;
+      const items = DOCTOR_SPECIALTIES.slice(start, start + pageSize).map((s) => ({ name: s }));
+      session.data.doctorSpecialtyPagination = { currentPage: targetPage, totalPages, pageSize };
+      session.data.doctorSpecialtyPageItems = items;
+      session.set('data', session.data);
+      await session.save();
+      const msg = buildPaginatedListMessage(items, targetPage, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg + '\nType a number to choose a specialty.', isLoggedIn));
+      return;
+    }
+
+    const selectMatch = messageText.trim().match(/^\d+$/);
+    if (selectMatch) {
+      const idx = parseInt(selectMatch[0], 10) - 1;
+      const items = session.data.doctorSpecialtyPageItems || [];
+      if (items[idx] && items[idx].name) {
+        const specialty = items[idx].name;
+        // Clear specialty pagination state
+        delete session.data.doctorSpecialtyPagination;
+        delete session.data.doctorSpecialtyPageItems;
+        session.set('data', session.data);
+        await session.save();
+        // Proceed to doctor search for chosen specialty
+        const pageSize = 5;
+        const location = 'Lagos';
+        const pageData = await searchDoctorsPaginated(specialty, location, 1, pageSize);
+        if (!pageData.items || pageData.items.length === 0) {
+          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any ${specialty} in ${location}. Try another specialty.`, isLoggedIn));
+          return;
+        }
+        session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
+        session.data.doctorPageItems = pageData.items;
+        session.data.lastDoctorSearch = { specialty, location };
+        session.set('data', session.data);
+        await session.save();
+        const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${specialty} doctors in ${location}:`, (doctor) => {
+          let s = `Dr. ${doctor.name}`;
+          if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
+          if (doctor.location) s += `\n   Location: ${doctor.location}`;
+          if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
+          return s;
+        });
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+        return;
+      }
+    }
+  }
+
   // Pagination navigation for doctors list
   if (session.data && session.data.doctorPagination) {
     const { currentPage, totalPages, pageSize } = session.data.doctorPagination;
@@ -1289,7 +1344,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       session.data.doctorPageItems = pageData.items;
       session.set('data', session.data);
       await session.save();
-      const isLoggedIn = isAuthenticatedSession(session);
+      const isLoggedInNow = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', (doctor) => {
         let s = `Dr. ${doctor.name}`;
         if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
@@ -1297,8 +1352,36 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
         return s;
       });
-      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedInNow));
       return;
+    }
+  }
+
+  // Pagination navigation for cart items
+  if (session.data && session.data.cartPagination) {
+    const { currentPage, totalPages, pageSize } = session.data.cartPagination;
+    const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+    if (targetPage) {
+      try {
+        const userId = session.data.userId;
+        const result = await require('./services/orderManagement').getCartPaginated(userId, { page: targetPage, pageSize });
+        session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+        session.set('data', session.data);
+        await session.save();
+
+        let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+        result.items.forEach((item, idx) => {
+          msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+        });
+        msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+        msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+        msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
+        return;
+      } catch (err) {
+        console.error('Cart pagination error:', err);
+      }
     }
   }
 
@@ -1371,6 +1454,15 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         }
         break;
 
+      case 'view_cart':
+        console.log(`🧺 Handling view cart`);
+        if (!isLoggedIn) {
+          await sendAuthRequiredMessage(phoneNumber);
+        } else {
+          await handleViewCart(phoneNumber, session, parameters);
+        }
+        break;
+
       case 'place_order':
         console.log(`📦 Handling place order`);
         if (!isLoggedIn) {
@@ -1378,6 +1470,11 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         } else {
           await handlePlaceOrder(phoneNumber, session, parameters);
         }
+        break;
+
+      case 'prescription_upload':
+        console.log(`📄 Handling prescription upload prompt`);
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Please upload your prescription document (image or PDF) by sending it as an attachment. You can caption it with your Order ID, e.g., rx 12345.', isLoggedIn));
         break;
 
       case 'track_order':
@@ -1553,16 +1650,18 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 };
 
 // Send authentication required message
-// Helper to check if a session is authenticated (logged in, has userId)
+// Helper to check if a session is authenticated using token validity
 const isAuthenticatedSession = (session) => {
   try {
-    // Consider session authenticated if its state is LOGGED_IN or session.data contains a userId.
-    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects,
-    // so we accept either indicator as authentication.
     if (!session) return false;
-    if (session.state === 'LOGGED_IN') return true;
-    if (session.data && session.data.userId) return true;
-    return false;
+    const data = session.data || {};
+    // Require a token and check idle expiry window
+    if (!data.token) return false;
+    const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
+    const lastUsedStr = data.tokenLastUsed || session.lastActivity;
+    if (!lastUsedStr) return false;
+    const lastUsed = new Date(lastUsedStr);
+    return (Date.now() - lastUsed.getTime()) <= idleMinutes * 60 * 1000;
   } catch (e) {
     return false;
   }
@@ -1860,24 +1959,28 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
     }
 
     if (!parameters.productIndex || !parameters.quantity) {
-      const msg = formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your search results.", isLoggedIn);
+      const msg = formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your list.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const productIndex = parseInt(parameters.productIndex) - 1;
-    const quantity = parseInt(parameters.quantity);
+    const productIndex = parseInt(parameters.productIndex, 10) - 1;
+    const quantity = parseInt(parameters.quantity, 10);
 
-    if (!session.data.searchResults || !session.data.searchResults[productIndex]) {
-      const msg = formatResponseWithOptions("Please search for products first before adding to cart.", isLoggedIn);
+    const candidates = (session.data.searchResults || [])
+      .concat(session.data.productPageItems || [])
+      .concat(session.data.healthcareProductPageItems || []);
+
+    if (!candidates[productIndex]) {
+      const msg = formatResponseWithOptions("Please list products first (e.g., 'search medicines' or 'browse health products'), then use 'add [number] [qty]'.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const product = session.data.searchResults[productIndex];
-    const result = await addToCart(session.data.userId, product.id, quantity);
+    const product = candidates[productIndex];
+    await addToCart(session.data.userId, product.id, quantity);
 
-    const successMsg = formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout' to place your order.`, isLoggedIn);
+    const successMsg = formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout [address] [flutterwave|paystack|cash]' to place your order.`, isLoggedIn);
     await sendWhatsAppMessage(phoneNumber, successMsg);
   } catch (error) {
     console.error('Error adding to cart:', error);
@@ -2006,6 +2109,74 @@ const buildProductListMessage = (items, page, totalPages) => {
   return message;
 };
 
+// Handle view cart
+const { getCartPaginated } = require('./services/orderManagement');
+
+const handleViewCart = async (phoneNumber, session, parameters) => {
+  try {
+    const isLoggedIn = isAuthenticatedSession(session);
+    try { await session.reload(); } catch (_) {}
+    const userId = session.data && session.data.userId;
+    if (!userId) { await sendAuthRequiredMessage(phoneNumber); return; }
+
+    const pageSize = 5;
+    const result = await getCartPaginated(userId, { page: 1, pageSize });
+    if (!result.success) {
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Sorry, could not fetch your cart right now.', isLoggedIn));
+      return;
+    }
+    if (result.empty) {
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Your cart is empty. Browse products and add items with "add [number] [qty]".', isLoggedIn));
+      return;
+    }
+
+    session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+    session.set('data', session.data);
+    await session.save();
+
+    let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+    result.items.forEach((item, idx) => {
+      msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+    });
+    msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+    msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+    msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+  } catch (error) {
+    console.error('Error viewing cart:', error);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Sorry, we encountered an error while fetching your cart.', isAuthenticatedSession(session)));
+  }
+};
+
+// Cart pagination navigation
+if (session && session.data && session.data.cartPagination) {
+  const { currentPage, totalPages, pageSize } = session.data.cartPagination;
+  const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+  if (targetPage) {
+    try {
+      const userId = session.data.userId;
+      const result = await getCartPaginated(userId, { page: targetPage, pageSize });
+      session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+      session.set('data', session.data);
+      await session.save();
+
+      let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+      result.items.forEach((item, idx) => {
+        msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+      });
+      msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+      msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+      msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
+      // Early return is inside main handler; this snippet exists within main context
+    } catch (err) {
+      console.error('Cart pagination error:', err);
+    }
+  }
+}
+
 // Handle track order
 const handleTrackOrder = async (phoneNumber, session, parameters) => {
   try {
@@ -2071,14 +2242,31 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
   }
 };
 
+// Doctor specialties seed
+const DOCTOR_SPECIALTIES = [
+  'Cardiologist', 'Pediatrician', 'Dermatologist', 'Gynecologist', 'General Practitioner',
+  'Neurologist', 'Orthopedic', 'Ophthalmologist', 'Pulmonologist', 'Gastroenterologist',
+  'Urologist', 'Psychiatrist'
+];
+
 // Handle doctor search
 const handleDoctorSearch = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
     if (!parameters.specialty) {
-      const msg = formatResponseWithOptions("What type of doctor are you looking for? Please provide a specialty (e.g., Cardiologist, Pediatrician).", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      // Show paginated specialties list
+      const pageSize = 6;
+      const page = 1;
+      const totalPages = Math.max(1, Math.ceil(DOCTOR_SPECIALTIES.length / pageSize));
+      const items = DOCTOR_SPECIALTIES.slice(0, pageSize).map((s) => ({ name: s }));
+      session.data.doctorSpecialtyPagination = { currentPage: page, totalPages, pageSize };
+      session.data.doctorSpecialtyPageItems = items;
+      session.set('data', session.data);
+      await session.save();
+
+      const msg = buildPaginatedListMessage(items, page, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg + '\nType a number to choose a specialty.', isLoggedIn));
       return;
     }
 
@@ -2225,17 +2413,18 @@ const handlePayment = async (phoneNumber, session, parameters) => {
 
 // Handle help
 const handleHelp = async (phoneNumber, isLoggedIn) => {
-  const helpMessage = `��� *Drugs.ng WhatsApp Bot - Available Services:*
+  const helpMessage = `🏥 *Drugs.ng WhatsApp Bot - Available Services:*
 
 1️⃣ *Search Medicines* - Type "1" or "Find paracetamol"
 2️⃣ *Find Doctors* - Type "2" or "Find a cardiologist"
 3️⃣ *Track Orders* - Type "3" or "Track 12345"
 4️⃣ *Book Appointment* - Type "4" or "Book a doctor"
-5️⃣ *Place Order* - Type "5" or "Order medicines"
+5️⃣ *View Cart* - Type "5" or "cart"
 6️⃣ *Customer Support* - Type "6" or "Connect me to support"
-7️⃣ *Upload Prescription* (image or PDF) - Send your file. To auto-attach, add a caption with your Order ID, e.g.: rx 12345 (also accepts "order 12345" or "prescription 12345"). Find your Order ID in your order confirmation message (e.g., "Order ID: #12345"). If unsure, type "support" and we’ll help link it.
+7️⃣ *Upload Prescription* (image or PDF) - Send your file. To auto-attach, add a caption with your Order ID, e.g.: rx 12345 (also accepts "order 12345" or "prescription 12345"). Find your Order ID in your order confirmation message. If unsure, type "support" and we’ll help link it.
+8️⃣ *Browse Healthcare Products* - Type "8" or "browse health products"
 
-Simply reply with a number (1-7) or describe what you need!`;
+Simply reply with a number (1-8) or describe what you need!`;
 
   const messageWithOptions = formatResponseWithOptions(helpMessage, isLoggedIn);
   await sendWhatsAppMessage(phoneNumber, messageWithOptions);
