@@ -561,7 +561,15 @@ const searchDoctorsPaginated = async (specialty, location, page = 1, pageSize = 
     available: true,
     [Op.and]: []
   };
-  if (specialty) where[Op.and].push({ specialty: { [Op.iLike]: `%${specialty}%` } });
+
+  // Search by name, specialty, or location
+  if (specialty) {
+    where[Op.or] = [
+      { name: { [Op.iLike]: `%${specialty}%` } },
+      { specialty: { [Op.iLike]: `%${specialty}%` } },
+      { department: { [Op.iLike]: `%${specialty}%` } }
+    ];
+  }
   if (location) where[Op.and].push({ location: { [Op.iLike]: `%${location}%` } });
 
   const { rows, count } = await Doctor.findAndCountAll({ where, limit: safeSize, offset, order: [['rating','DESC']] });
