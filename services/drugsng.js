@@ -223,62 +223,58 @@ const listAllProductsPaginated = async (page = 1, pageSize = 5) => {
 
 // Search products
 const searchProducts = async (query) => {
+  // Validate input first
+  if (!query || typeof query !== 'string') {
+    throw new Error('Search query is required');
+  }
+
+  const sanitizedQuery = sanitizeInput(query);
+  if (sanitizedQuery.length < 2) {
+    throw new Error('Search query must be at least 2 characters');
+  }
+
+  // Try Drugs.ng API first
   try {
-    // Validate input
-    if (!query || typeof query !== 'string') {
-      throw new Error('Search query is required');
-    }
+    const response = await drugsngAPI.get(`/products?search=${encodeURIComponent(sanitizedQuery)}`);
+    return response.data;
+  } catch (apiError) {
+    console.warn('Drugs.ng API search failed, using fallback');
+  }
 
-    const sanitizedQuery = sanitizeInput(query);
-    if (sanitizedQuery.length < 2) {
-      throw new Error('Search query must be at least 2 characters');
-    }
+  // Fallback to PostgreSQL
+  try {
+    const { Op } = require('sequelize');
+    const products = await Product.findAll({
+      where: {
+        [Op.or]: [
+          { name: { [Op.iLike]: `%${sanitizedQuery}%` } },
+          { category: { [Op.iLike]: `%${sanitizedQuery}%` } },
+          { description: { [Op.iLike]: `%${sanitizedQuery}%` } }
+        ],
+        isActive: true
+      },
+      limit: 10
+    });
 
-    // Try Drugs.ng API first
-    try {
-      const response = await drugsngAPI.get(`/products?search=${encodeURIComponent(sanitizedQuery)}`);
-      return response.data;
-    } catch (apiError) {
-      console.warn('Drugs.ng API search failed, using fallback');
-      throw apiError;
-    }
-  } catch (error) {
-    console.warn('Drugs.ng API error:', error.message);
-    // Fallback to PostgreSQL
-    try {
-      const { Op } = require('sequelize');
-      const products = await Product.findAll({
-        where: {
-          [Op.or]: [
-            { name: { [Op.iLike]: `%${sanitizedQuery}%` } },
-            { category: { [Op.iLike]: `%${sanitizedQuery}%` } },
-            { description: { [Op.iLike]: `%${sanitizedQuery}%` } }
-          ],
-          isActive: true
-        },
-        limit: 10
-      });
-
-      // Ensure images for DB items
-      for (const p of products) {
-        if (!p.imageUrl) {
-          await ensureDbProductHasImage(p);
-        }
+    // Ensure images for DB items
+    for (const p of products) {
+      if (!p.imageUrl) {
+        await ensureDbProductHasImage(p);
       }
-
-      return products.map(product => ({
-        id: product.id,
-        name: product.name,
-        category: product.category,
-        description: product.description,
-        price: product.price,
-        stock: product.stock,
-        imageUrl: product.imageUrl
-      }));
-    } catch (dbError) {
-      console.error('Fallback search error:', dbError);
-      throw new Error('Unable to search products. Please try again later.');
     }
+
+    return products.map(product => ({
+      id: product.id,
+      name: product.name,
+      category: product.category,
+      description: product.description,
+      price: product.price,
+      stock: product.stock,
+      imageUrl: product.imageUrl
+    }));
+  } catch (dbError) {
+    console.error('Fallback search error:', dbError);
+    throw new Error('Unable to search products. Please try again later.');
   }
 };
 
