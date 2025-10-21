@@ -1259,6 +1259,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         pageSize: pageData.pageSize
       };
       session.data.productPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
       const isLoggedIn = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '📦 Medicines', (product) => {
@@ -1286,6 +1287,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         pageSize: pageData.pageSize
       };
       session.data.doctorPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
       const isLoggedIn = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', (doctor) => {
@@ -1554,10 +1556,13 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 // Helper to check if a session is authenticated (logged in, has userId)
 const isAuthenticatedSession = (session) => {
   try {
-    // Consider session authenticated if its state is LOGGED_IN.
-    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects.
-    // We treat LOGGED_IN state as the primary indicator; handlers that require userId still check session.data.userId explicitly.
-    return !!(session && session.state === 'LOGGED_IN');
+    // Consider session authenticated if its state is LOGGED_IN or session.data contains a userId.
+    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects,
+    // so we accept either indicator as authentication.
+    if (!session) return false;
+    if (session.state === 'LOGGED_IN') return true;
+    if (session.data && session.data.userId) return true;
+    return false;
   } catch (e) {
     return false;
   }
@@ -1789,6 +1794,7 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
         pageSize: pageData.pageSize
       };
       session.data.productPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
 
       const msg = buildProductListMessage(pageData.items, pageData.page, pageData.totalPages);
@@ -1818,6 +1824,7 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
 
     // Save search results in session for reference
     session.data.searchResults = products.slice(0, 5);
+    session.set('data', session.data);
     await session.save();
 
     const msgWithOptions = formatResponseWithOptions(message, isLoggedIn);
@@ -1834,9 +1841,18 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to add items to your cart. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    // Ensure session has latest data and userId
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -1872,9 +1888,17 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to place an order. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -2074,6 +2098,7 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
     session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
     session.data.doctorPageItems = pageData.items;
     session.data.lastDoctorSearch = { specialty: parameters.specialty, location };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${parameters.specialty} doctors in ${location}:`, (doctor) => {
@@ -2098,9 +2123,17 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to book an appointment. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -2142,9 +2175,17 @@ const handlePayment = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to make a payment. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -2506,6 +2547,7 @@ const handleDiagnosticTestSearch = async (phoneNumber, session, parameters) => {
     session.data.diagnosticTestPagination = { currentPage: page, totalPages, pageSize };
     session.data.diagnosticTestPageItems = rows;
     session.data.lastDiagnosticSearch = { testType: parameters.testType || null };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🔬 Diagnostic Tests', (test) => {
@@ -2554,6 +2596,7 @@ const handleHealthcareProductBrowse = async (phoneNumber, session, parameters) =
     session.data.healthcareProductPagination = { currentPage: page, totalPages, pageSize };
     session.data.healthcareProductPageItems = rows;
     session.data.lastHealthcareProductSearch = { category: parameters.category || null };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🛒 Healthcare Products', (product) => {
