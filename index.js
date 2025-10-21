@@ -1553,16 +1553,18 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 };
 
 // Send authentication required message
-// Helper to check if a session is authenticated (logged in, has userId)
+// Helper to check if a session is authenticated using token validity
 const isAuthenticatedSession = (session) => {
   try {
-    // Consider session authenticated if its state is LOGGED_IN or session.data contains a userId.
-    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects,
-    // so we accept either indicator as authentication.
     if (!session) return false;
-    if (session.state === 'LOGGED_IN') return true;
-    if (session.data && session.data.userId) return true;
-    return false;
+    const data = session.data || {};
+    // Require a token and check idle expiry window
+    if (!data.token) return false;
+    const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
+    const lastUsedStr = data.tokenLastUsed || session.lastActivity;
+    if (!lastUsedStr) return false;
+    const lastUsed = new Date(lastUsedStr);
+    return (Date.now() - lastUsed.getTime()) <= idleMinutes * 60 * 1000;
   } catch (e) {
     return false;
   }
