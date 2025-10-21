@@ -2160,11 +2160,6 @@ const handlePayment = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!isLoggedIn) {
-      await sendAuthRequiredMessage(phoneNumber);
-      return;
-    }
-
     try {
       await session.reload();
     } catch (_) {}
