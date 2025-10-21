@@ -309,21 +309,97 @@ const getPendingPrescriptionsPaginated = async (page = 1, pageSize = 10) => {
       offset
     });
 
-    const items = rows.map(p => ({
+    const items = rows.map((p, index) => ({
+      displayNumber: (safePage - 1) * safeSize + index + 1,
       id: p.id,
       orderId: p.orderId,
       fileUrl: p.fileUrl,
       verificationStatus: p.verificationStatus,
       createdAt: p.createdAt,
-      extractedText: p.extractedText
+      extractedText: p.extractedText,
+      orderData: p.Order ? { id: p.Order.id, userId: p.Order.userId, totalAmount: p.Order.totalAmount, createdAt: p.Order.createdAt } : null
     }));
 
     const total = count;
     const totalPages = Math.max(1, Math.ceil(total / safeSize));
 
-    return { items, total, totalPages, page: safePage, pageSize: safeSize };
+    return {
+      items,
+      total,
+      totalPages,
+      page: safePage,
+      pageSize: safeSize,
+      hasNextPage: safePage < totalPages,
+      hasPreviousPage: safePage > 1,
+      canNavigate: totalPages > 1
+    };
   } catch (error) {
     console.error('Error getting pending prescriptions paginated:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get pending prescriptions formatted for pharmacist verification with numbered options
+ * @param {number} page - Page number
+ * @param {number} pageSize - Items per page
+ * @returns {Object} Formatted prescription list with numbered options for selection
+ */
+const getPendingPrescriptionsForPharmacist = async (page = 1, pageSize = 5) => {
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const safeSize = Math.min(20, Math.max(1, parseInt(pageSize, 10) || 5));
+  const offset = (safePage - 1) * safeSize;
+
+  try {
+    const { rows, count } = await Prescription.findAndCountAll({
+      where: { verificationStatus: 'Pending' },
+      include: [
+        {
+          model: Order,
+          attributes: ['id', 'userId', 'totalAmount', 'createdAt', 'status']
+        }
+      ],
+      order: [['createdAt', 'ASC']],
+      limit: safeSize,
+      offset
+    });
+
+    const total = count;
+    const totalPages = Math.max(1, Math.ceil(total / safeSize));
+
+    const items = rows.map((p, index) => ({
+      displayNumber: (safePage - 1) * safeSize + index + 1,
+      id: p.id,
+      orderId: p.orderId,
+      fileUrl: p.fileUrl,
+      verificationStatus: p.verificationStatus,
+      createdAt: p.createdAt,
+      extractedText: p.extractedText,
+      ocrStatus: p.extractedText ? 'extracted' : 'pending_extraction',
+      orderData: p.Order ? {
+        id: p.Order.id,
+        userId: p.Order.userId,
+        totalAmount: p.Order.totalAmount,
+        createdAt: p.Order.createdAt,
+        status: p.Order.status
+      } : null
+    }));
+
+    return {
+      success: true,
+      items,
+      pagination: {
+        total,
+        totalPages,
+        currentPage: safePage,
+        pageSize: safeSize,
+        hasNextPage: safePage < totalPages,
+        hasPreviousPage: safePage > 1
+      },
+      message: `Pending Prescriptions (Page ${safePage}/${totalPages})\n\n${items.map(p => `${p.displayNumber}. Order #${p.orderId} - OCR: ${p.ocrStatus}`).join('\n')}`
+    };
+  } catch (error) {
+    console.error('Error getting pending prescriptions for pharmacist:', error);
     throw error;
   }
 };
