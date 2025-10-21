@@ -1274,6 +1274,61 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     }
   }
 
+  // Pagination navigation for specialties list
+  if (session.data && session.data.doctorSpecialtyPagination) {
+    const { currentPage, totalPages, pageSize } = session.data.doctorSpecialtyPagination;
+    const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+    const isLoggedIn = isAuthenticatedSession(session);
+
+    if (targetPage) {
+      const start = (targetPage - 1) * pageSize;
+      const items = DOCTOR_SPECIALTIES.slice(start, start + pageSize).map((s) => ({ name: s }));
+      session.data.doctorSpecialtyPagination = { currentPage: targetPage, totalPages, pageSize };
+      session.data.doctorSpecialtyPageItems = items;
+      session.set('data', session.data);
+      await session.save();
+      const msg = buildPaginatedListMessage(items, targetPage, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg + '\nType a number to choose a specialty.', isLoggedIn));
+      return;
+    }
+
+    const selectMatch = messageText.trim().match(/^\d+$/);
+    if (selectMatch) {
+      const idx = parseInt(selectMatch[0], 10) - 1;
+      const items = session.data.doctorSpecialtyPageItems || [];
+      if (items[idx] && items[idx].name) {
+        const specialty = items[idx].name;
+        // Clear specialty pagination state
+        delete session.data.doctorSpecialtyPagination;
+        delete session.data.doctorSpecialtyPageItems;
+        session.set('data', session.data);
+        await session.save();
+        // Proceed to doctor search for chosen specialty
+        const pageSize = 5;
+        const location = 'Lagos';
+        const pageData = await searchDoctorsPaginated(specialty, location, 1, pageSize);
+        if (!pageData.items || pageData.items.length === 0) {
+          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any ${specialty} in ${location}. Try another specialty.`, isLoggedIn));
+          return;
+        }
+        session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
+        session.data.doctorPageItems = pageData.items;
+        session.data.lastDoctorSearch = { specialty, location };
+        session.set('data', session.data);
+        await session.save();
+        const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${specialty} doctors in ${location}:`, (doctor) => {
+          let s = `Dr. ${doctor.name}`;
+          if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
+          if (doctor.location) s += `\n   Location: ${doctor.location}`;
+          if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
+          return s;
+        });
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+        return;
+      }
+    }
+  }
+
   // Pagination navigation for doctors list
   if (session.data && session.data.doctorPagination) {
     const { currentPage, totalPages, pageSize } = session.data.doctorPagination;
@@ -1289,7 +1344,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       session.data.doctorPageItems = pageData.items;
       session.set('data', session.data);
       await session.save();
-      const isLoggedIn = isAuthenticatedSession(session);
+      const isLoggedInNow = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', (doctor) => {
         let s = `Dr. ${doctor.name}`;
         if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
@@ -1297,7 +1352,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
         return s;
       });
-      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedInNow));
       return;
     }
   }
