@@ -2081,6 +2081,74 @@ const buildProductListMessage = (items, page, totalPages) => {
   return message;
 };
 
+// Handle view cart
+const { getCartPaginated } = require('./services/orderManagement');
+
+const handleViewCart = async (phoneNumber, session, parameters) => {
+  try {
+    const isLoggedIn = isAuthenticatedSession(session);
+    try { await session.reload(); } catch (_) {}
+    const userId = session.data && session.data.userId;
+    if (!userId) { await sendAuthRequiredMessage(phoneNumber); return; }
+
+    const pageSize = 5;
+    const result = await getCartPaginated(userId, { page: 1, pageSize });
+    if (!result.success) {
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Sorry, could not fetch your cart right now.', isLoggedIn));
+      return;
+    }
+    if (result.empty) {
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Your cart is empty. Browse products and add items with "add [number] [qty]".', isLoggedIn));
+      return;
+    }
+
+    session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+    session.set('data', session.data);
+    await session.save();
+
+    let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+    result.items.forEach((item, idx) => {
+      msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+    });
+    msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+    msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+    msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+  } catch (error) {
+    console.error('Error viewing cart:', error);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Sorry, we encountered an error while fetching your cart.', isAuthenticatedSession(session)));
+  }
+};
+
+// Cart pagination navigation
+if (session && session.data && session.data.cartPagination) {
+  const { currentPage, totalPages, pageSize } = session.data.cartPagination;
+  const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
+  if (targetPage) {
+    try {
+      const userId = session.data.userId;
+      const result = await getCartPaginated(userId, { page: targetPage, pageSize });
+      session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
+      session.set('data', session.data);
+      await session.save();
+
+      let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
+      result.items.forEach((item, idx) => {
+        msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
+      });
+      msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
+      msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+      msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
+
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
+      // Early return is inside main handler; this snippet exists within main context
+    } catch (err) {
+      console.error('Cart pagination error:', err);
+    }
+  }
+}
+
 // Handle track order
 const handleTrackOrder = async (phoneNumber, session, parameters) => {
   try {
