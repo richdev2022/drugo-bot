@@ -1556,10 +1556,13 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 // Helper to check if a session is authenticated (logged in, has userId)
 const isAuthenticatedSession = (session) => {
   try {
-    // Consider session authenticated if its state is LOGGED_IN.
-    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects.
-    // We treat LOGGED_IN state as the primary indicator; handlers that require userId still check session.data.userId explicitly.
-    return !!(session && session.state === 'LOGGED_IN');
+    // Consider session authenticated if its state is LOGGED_IN or session.data contains a userId.
+    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects,
+    // so we accept either indicator as authentication.
+    if (!session) return false;
+    if (session.state === 'LOGGED_IN') return true;
+    if (session.data && session.data.userId) return true;
+    return false;
   } catch (e) {
     return false;
   }
@@ -1681,7 +1684,7 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
           emailSent = false;
           console.error('Error sending OTP email via Brevo:', emailError);
           // Even if email send fails, allow user to verify with backup OTP from admin
-          const fallbackMsg = formatResponseWithOptions(`⚠��� **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
+          const fallbackMsg = formatResponseWithOptions(`⚠️ **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
           await sendWhatsAppMessage(phoneNumber, fallbackMsg);
         }
 
@@ -2038,7 +2041,7 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
     const statusEmoji = {
       'Processing': '⏳',
       'Shipped': '🚚',
-      'Delivered': '�����',
+      'Delivered': '���',
       'Cancelled': '❌'
     };
 
