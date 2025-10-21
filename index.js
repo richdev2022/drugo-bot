@@ -2091,14 +2091,31 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
   }
 };
 
+// Doctor specialties seed
+const DOCTOR_SPECIALTIES = [
+  'Cardiologist', 'Pediatrician', 'Dermatologist', 'Gynecologist', 'General Practitioner',
+  'Neurologist', 'Orthopedic', 'Ophthalmologist', 'Pulmonologist', 'Gastroenterologist',
+  'Urologist', 'Psychiatrist'
+];
+
 // Handle doctor search
 const handleDoctorSearch = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
     if (!parameters.specialty) {
-      const msg = formatResponseWithOptions("What type of doctor are you looking for? Please provide a specialty (e.g., Cardiologist, Pediatrician).", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      // Show paginated specialties list
+      const pageSize = 6;
+      const page = 1;
+      const totalPages = Math.max(1, Math.ceil(DOCTOR_SPECIALTIES.length / pageSize));
+      const items = DOCTOR_SPECIALTIES.slice(0, pageSize).map((s) => ({ name: s }));
+      session.data.doctorSpecialtyPagination = { currentPage: page, totalPages, pageSize };
+      session.data.doctorSpecialtyPageItems = items;
+      session.set('data', session.data);
+      await session.save();
+
+      const msg = buildPaginatedListMessage(items, page, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg + '\nType a number to choose a specialty.', isLoggedIn));
       return;
     }
 
