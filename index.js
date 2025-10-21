@@ -1841,11 +1841,6 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!isLoggedIn) {
-      await sendAuthRequiredMessage(phoneNumber);
-      return;
-    }
-
     // Ensure session has latest data and userId
     try {
       await session.reload();
