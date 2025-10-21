@@ -221,64 +221,94 @@ const listAllProductsPaginated = async (page = 1, pageSize = 5) => {
   return { items, total, totalPages, page: safePage, pageSize: safeSize, source: 'db' };
 };
 
-// Search products
+// Search products (and doctors if applicable)
 const searchProducts = async (query) => {
+  // Validate input first
+  if (!query || typeof query !== 'string') {
+    throw new Error('Search query is required');
+  }
+
+  const sanitizedQuery = sanitizeInput(query);
+  if (sanitizedQuery.length < 2) {
+    throw new Error('Search query must be at least 2 characters');
+  }
+
+  // Try Drugs.ng API first
   try {
-    // Validate input
-    if (!query || typeof query !== 'string') {
-      throw new Error('Search query is required');
-    }
+    const response = await drugsngAPI.get(`/products?search=${encodeURIComponent(sanitizedQuery)}`);
+    return response.data;
+  } catch (apiError) {
+    console.warn('Drugs.ng API search failed, using fallback');
+  }
 
-    const sanitizedQuery = sanitizeInput(query);
-    if (sanitizedQuery.length < 2) {
-      throw new Error('Search query must be at least 2 characters');
-    }
+  // Fallback to PostgreSQL - search products
+  try {
+    const { Op } = require('sequelize');
+    const products = await Product.findAll({
+      where: {
+        [Op.or]: [
+          { name: { [Op.iLike]: `%${sanitizedQuery}%` } },
+          { category: { [Op.iLike]: `%${sanitizedQuery}%` } },
+          { description: { [Op.iLike]: `%${sanitizedQuery}%` } }
+        ],
+        isActive: true
+      },
+      limit: 10
+    });
 
-    // Try Drugs.ng API first
-    try {
-      const response = await drugsngAPI.get(`/products?search=${encodeURIComponent(sanitizedQuery)}`);
-      return response.data;
-    } catch (apiError) {
-      console.warn('Drugs.ng API search failed, using fallback');
-      throw apiError;
-    }
-  } catch (error) {
-    console.warn('Drugs.ng API error:', error.message);
-    // Fallback to PostgreSQL
-    try {
-      const { Op } = require('sequelize');
-      const products = await Product.findAll({
+    // Check if query matches doctor keywords - if so, also search doctors
+    const doctorKeywords = ['doctor', 'specialist', 'cardiologist', 'pediatrician', 'dermatologist', 'neurologist', 'physician'];
+    const queryLower = sanitizedQuery.toLowerCase();
+    const isDoctorSearch = doctorKeywords.some(kw => queryLower.includes(kw));
+
+    if (isDoctorSearch && products.length === 0) {
+      const doctors = await Doctor.findAll({
         where: {
           [Op.or]: [
             { name: { [Op.iLike]: `%${sanitizedQuery}%` } },
-            { category: { [Op.iLike]: `%${sanitizedQuery}%` } },
-            { description: { [Op.iLike]: `%${sanitizedQuery}%` } }
+            { specialty: { [Op.iLike]: `%${sanitizedQuery}%` } },
+            { department: { [Op.iLike]: `%${sanitizedQuery}%` } }
           ],
-          isActive: true
+          isActive: true,
+          available: true
         },
         limit: 10
       });
 
-      // Ensure images for DB items
-      for (const p of products) {
-        if (!p.imageUrl) {
-          await ensureDbProductHasImage(p);
-        }
+      if (doctors.length > 0) {
+        return doctors.map(doctor => ({
+          id: doctor.id,
+          type: 'doctor',
+          name: `Dr. ${doctor.name}`,
+          specialty: doctor.specialty,
+          department: doctor.department,
+          location: doctor.location,
+          rating: doctor.rating,
+          imageUrl: doctor.imageUrl
+        }));
       }
-
-      return products.map(product => ({
-        id: product.id,
-        name: product.name,
-        category: product.category,
-        description: product.description,
-        price: product.price,
-        stock: product.stock,
-        imageUrl: product.imageUrl
-      }));
-    } catch (dbError) {
-      console.error('Fallback search error:', dbError);
-      throw new Error('Unable to search products. Please try again later.');
     }
+
+    // Ensure images for DB items
+    for (const p of products) {
+      if (!p.imageUrl) {
+        await ensureDbProductHasImage(p);
+      }
+    }
+
+    return products.map(product => ({
+      id: product.id,
+      type: 'product',
+      name: product.name,
+      category: product.category,
+      description: product.description,
+      price: product.price,
+      stock: product.stock,
+      imageUrl: product.imageUrl
+    }));
+  } catch (dbError) {
+    console.error('Fallback search error:', dbError);
+    throw new Error('Unable to search products. Please try again later.');
   }
 };
 
@@ -531,7 +561,15 @@ const searchDoctorsPaginated = async (specialty, location, page = 1, pageSize = 
     available: true,
     [Op.and]: []
   };
-  if (specialty) where[Op.and].push({ specialty: { [Op.iLike]: `%${specialty}%` } });
+
+  // Search by name, specialty, or location
+  if (specialty) {
+    where[Op.or] = [
+      { name: { [Op.iLike]: `%${specialty}%` } },
+      { specialty: { [Op.iLike]: `%${specialty}%` } },
+      { department: { [Op.iLike]: `%${specialty}%` } }
+    ];
+  }
   if (location) where[Op.and].push({ location: { [Op.iLike]: `%${location}%` } });
 
   const { rows, count } = await Doctor.findAndCountAll({ where, limit: safeSize, offset, order: [['rating','DESC']] });
