@@ -1681,7 +1681,7 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
           emailSent = false;
           console.error('Error sending OTP email via Brevo:', emailError);
           // Even if email send fails, allow user to verify with backup OTP from admin
-          const fallbackMsg = formatResponseWithOptions(`⚠️ **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
+          const fallbackMsg = formatResponseWithOptions(`⚠��� **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
           await sendWhatsAppMessage(phoneNumber, fallbackMsg);
         }
 
@@ -1838,9 +1838,18 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to add items to your cart. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    // Ensure session has latest data and userId
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -1876,9 +1885,17 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to place an order. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -2021,7 +2038,7 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
     const statusEmoji = {
       'Processing': '⏳',
       'Shipped': '🚚',
-      'Delivered': '���',
+      'Delivered': '�����',
       'Cancelled': '❌'
     };
 
@@ -2103,9 +2120,17 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to book an appointment. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
@@ -2147,9 +2172,17 @@ const handlePayment = async (phoneNumber, session, parameters) => {
   try {
     const isLoggedIn = isAuthenticatedSession(session);
 
-    if (!session.data.userId) {
-      const msg = formatResponseWithOptions("Please login first to make a payment. Type 'login' to proceed.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+    if (!isLoggedIn) {
+      await sendAuthRequiredMessage(phoneNumber);
+      return;
+    }
+
+    try {
+      await session.reload();
+    } catch (_) {}
+    const userIdFromSession = session.data && session.data.userId;
+    if (!userIdFromSession) {
+      await sendAuthRequiredMessage(phoneNumber);
       return;
     }
 
