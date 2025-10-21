@@ -2149,34 +2149,6 @@ const handleViewCart = async (phoneNumber, session, parameters) => {
   }
 };
 
-// Cart pagination navigation
-if (session && session.data && session.data.cartPagination) {
-  const { currentPage, totalPages, pageSize } = session.data.cartPagination;
-  const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
-  if (targetPage) {
-    try {
-      const userId = session.data.userId;
-      const result = await getCartPaginated(userId, { page: targetPage, pageSize });
-      session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
-      session.set('data', session.data);
-      await session.save();
-
-      let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
-      result.items.forEach((item, idx) => {
-        msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
-      });
-      msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
-      msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
-      msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
-
-      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
-      // Early return is inside main handler; this snippet exists within main context
-    } catch (err) {
-      console.error('Cart pagination error:', err);
-    }
-  }
-}
-
 // Handle track order
 const handleTrackOrder = async (phoneNumber, session, parameters) => {
   try {
