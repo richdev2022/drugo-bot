@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <style><![CDATA[
+      image { image-rendering: optimizeQuality; }
+    ]]></style>
+  </defs>
+  <image href="https://cdn.builder.io/api/v1/image/assets%2F89edfb014b264aa1be87a238c6cee9b8%2F26c24c9523574d838f55b9611e7fecf7?format=webp&width=800" x="0" y="0" width="128" height="128" preserveAspectRatio="xMidYMid meet"/>
+</svg>

@@ -1,0 +1,75 @@
+# render.yaml - template for Render services environment variables
+services:
+- type: web
+  name: drugsng-whatsapp-bot
+  env: production
+  plan: free
+  buildCommand: "npm install && npm run build || true"
+  startCommand: "npm run start"
+  envVars:
+    - key: WHATSAPP_ACCESS_TOKEN
+      value: "REPLACE_ME"
+      sync: false
+    - key: WHATSAPP_PHONE_NUMBER_ID
+      value: "REPLACE_ME"
+      sync: false
+    - key: WHATSAPP_VERIFY_TOKEN
+      value: "REPLACE_ME"
+      sync: false
+    - key: ENCRYPTION_KEY
+      value: "REPLACE_ME"
+      sync: false
+    - key: DATABASE_URL
+      value: "REPLACE_ME"
+      sync: false
+    - key: DB_HOST
+      value: "REPLACE_ME"
+      sync: false
+    - key: DB_PORT
+      value: "REPLACE_ME"
+      sync: false
+    - key: DB_NAME
+      value: "REPLACE_ME"
+      sync: false
+    - key: DB_USER
+      value: "REPLACE_ME"
+      sync: false
+    - key: DB_PASSWORD
+      value: "REPLACE_ME"
+      sync: false
+    - key: OWNER_EMAIL
+      value: "REPLACE_ME"
+      sync: false
+    - key: OWNER_PASSWORD
+      value: "REPLACE_ME"
+      sync: false
+    - key: PORT
+      value: "REPLACE_ME"
+      sync: false
+    - key: NODE_ENV
+      value: "REPLACE_ME"
+      sync: false
+    - key: LOG_LEVEL
+      value: "REPLACE_ME"
+      sync: false
+    - key: FLUTTERWAVE_PUBLIC_KEY
+      value: "REPLACE_ME"
+      sync: false
+    - key: FLUTTERWAVE_SECRET_KEY
+      value: "REPLACE_ME"
+      sync: false
+    - key: FLUTTERWAVE_SECRET_HASH
+      value: "REPLACE_ME"
+      sync: false
+    - key: PAYSTACK_SECRET_KEY
+      value: "REPLACE_ME"
+      sync: false
+    - key: PAYMENT_REDIRECT_URL
+      value: "REPLACE_ME"
+      sync: false
+    - key: DRUGSNG_API_BASE_URL
+      value: "REPLACE_ME"
+      sync: false
+    - key: COMPANY_LOGO
+      value: "REPLACE_ME"
+      sync: false
