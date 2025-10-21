@@ -1259,6 +1259,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         pageSize: pageData.pageSize
       };
       session.data.productPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
       const isLoggedIn = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '📦 Medicines', (product) => {
@@ -1286,6 +1287,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         pageSize: pageData.pageSize
       };
       session.data.doctorPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
       const isLoggedIn = isAuthenticatedSession(session);
       const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', (doctor) => {
@@ -1789,6 +1791,7 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
         pageSize: pageData.pageSize
       };
       session.data.productPageItems = pageData.items;
+      session.set('data', session.data);
       await session.save();
 
       const msg = buildProductListMessage(pageData.items, pageData.page, pageData.totalPages);
@@ -1818,6 +1821,7 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
 
     // Save search results in session for reference
     session.data.searchResults = products.slice(0, 5);
+    session.set('data', session.data);
     await session.save();
 
     const msgWithOptions = formatResponseWithOptions(message, isLoggedIn);
@@ -2074,6 +2078,7 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
     session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
     session.data.doctorPageItems = pageData.items;
     session.data.lastDoctorSearch = { specialty: parameters.specialty, location };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${parameters.specialty} doctors in ${location}:`, (doctor) => {
@@ -2506,6 +2511,7 @@ const handleDiagnosticTestSearch = async (phoneNumber, session, parameters) => {
     session.data.diagnosticTestPagination = { currentPage: page, totalPages, pageSize };
     session.data.diagnosticTestPageItems = rows;
     session.data.lastDiagnosticSearch = { testType: parameters.testType || null };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🔬 Diagnostic Tests', (test) => {
@@ -2554,6 +2560,7 @@ const handleHealthcareProductBrowse = async (phoneNumber, session, parameters) =
     session.data.healthcareProductPagination = { currentPage: page, totalPages, pageSize };
     session.data.healthcareProductPageItems = rows;
     session.data.lastHealthcareProductSearch = { category: parameters.category || null };
+    session.set('data', session.data);
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🛒 Healthcare Products', (product) => {
