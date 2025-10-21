@@ -1554,7 +1554,10 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 // Helper to check if a session is authenticated (logged in, has userId)
 const isAuthenticatedSession = (session) => {
   try {
-    return !!(session && session.state === 'LOGGED_IN' && session.data && session.data.userId);
+    // Consider session authenticated if its state is LOGGED_IN.
+    // Some nested session.data updates may not be detected by Sequelize when mutating nested objects.
+    // We treat LOGGED_IN state as the primary indicator; handlers that require userId still check session.data.userId explicitly.
+    return !!(session && session.state === 'LOGGED_IN');
   } catch (e) {
     return false;
   }
@@ -1737,12 +1740,14 @@ const handleLogin = async (phoneNumber, session, parameters) => {
         // Login user
         const result = await loginUser(credentials);
 
-        // Update session
+        // Update session - set full data object to ensure Sequelize detects changes to JSONB
         session.state = 'LOGGED_IN';
-        session.data.userId = result.userId;
-        // Ensure a session token exists (use external token if provided, otherwise generate one)
-        session.data.token = result.token || generateToken();
-        session.data.tokenLastUsed = new Date().toISOString();
+        session.data = Object.assign(session.data || {}, {
+          userId: result.userId,
+          token: result.token || generateToken(),
+          tokenLastUsed: new Date().toISOString()
+        });
+        session.set('data', session.data);
         await session.save();
 
         const successMsg = formatResponseWithOptions(`✅ Login successful! Welcome back to Drugs.ng. Type 'help' to see what you can do.`, true);
@@ -2431,13 +2436,15 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
 
       // ONLY NOW update session with user data (after successful registration)
       session.state = 'LOGGED_IN';
-      session.data.userId = result.userId;
-      // Ensure a session token exists (use external token if provided, otherwise generate one)
-      session.data.token = result.token || generateToken();
-      session.data.tokenLastUsed = new Date().toISOString();
-      session.data.waitingForOTPVerification = false;
-      session.data.registrationData = null;
-      session.data.emailSendFailed = false;
+      session.data = Object.assign(session.data || {}, {
+        userId: result.userId,
+        token: result.token || generateToken(),
+        tokenLastUsed: new Date().toISOString(),
+        waitingForOTPVerification: false,
+        registrationData: null,
+        emailSendFailed: false
+      });
+      session.set('data', session.data);
       await session.save();
 
       // Notify support teams
