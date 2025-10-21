@@ -221,7 +221,7 @@ const listAllProductsPaginated = async (page = 1, pageSize = 5) => {
   return { items, total, totalPages, page: safePage, pageSize: safeSize, source: 'db' };
 };
 
-// Search products
+// Search products (and doctors if applicable)
 const searchProducts = async (query) => {
   // Validate input first
   if (!query || typeof query !== 'string') {
@@ -241,7 +241,7 @@ const searchProducts = async (query) => {
     console.warn('Drugs.ng API search failed, using fallback');
   }
 
-  // Fallback to PostgreSQL
+  // Fallback to PostgreSQL - search products
   try {
     const { Op } = require('sequelize');
     const products = await Product.findAll({
@@ -256,6 +256,39 @@ const searchProducts = async (query) => {
       limit: 10
     });
 
+    // Check if query matches doctor keywords - if so, also search doctors
+    const doctorKeywords = ['doctor', 'specialist', 'cardiologist', 'pediatrician', 'dermatologist', 'neurologist', 'physician'];
+    const queryLower = sanitizedQuery.toLowerCase();
+    const isDoctorSearch = doctorKeywords.some(kw => queryLower.includes(kw));
+
+    if (isDoctorSearch && products.length === 0) {
+      const doctors = await Doctor.findAll({
+        where: {
+          [Op.or]: [
+            { name: { [Op.iLike]: `%${sanitizedQuery}%` } },
+            { specialty: { [Op.iLike]: `%${sanitizedQuery}%` } },
+            { department: { [Op.iLike]: `%${sanitizedQuery}%` } }
+          ],
+          isActive: true,
+          available: true
+        },
+        limit: 10
+      });
+
+      if (doctors.length > 0) {
+        return doctors.map(doctor => ({
+          id: doctor.id,
+          type: 'doctor',
+          name: `Dr. ${doctor.name}`,
+          specialty: doctor.specialty,
+          department: doctor.department,
+          location: doctor.location,
+          rating: doctor.rating,
+          imageUrl: doctor.imageUrl
+        }));
+      }
+    }
+
     // Ensure images for DB items
     for (const p of products) {
       if (!p.imageUrl) {
@@ -265,6 +298,7 @@ const searchProducts = async (query) => {
 
     return products.map(product => ({
       id: product.id,
+      type: 'product',
       name: product.name,
       category: product.category,
       description: product.description,
