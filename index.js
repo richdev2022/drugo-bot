@@ -2227,17 +2227,18 @@ const handlePayment = async (phoneNumber, session, parameters) => {
 
 // Handle help
 const handleHelp = async (phoneNumber, isLoggedIn) => {
-  const helpMessage = `��� *Drugs.ng WhatsApp Bot - Available Services:*
+  const helpMessage = `🏥 *Drugs.ng WhatsApp Bot - Available Services:*
 
 1️⃣ *Search Medicines* - Type "1" or "Find paracetamol"
 2️⃣ *Find Doctors* - Type "2" or "Find a cardiologist"
 3️⃣ *Track Orders* - Type "3" or "Track 12345"
 4️⃣ *Book Appointment* - Type "4" or "Book a doctor"
-5️⃣ *Place Order* - Type "5" or "Order medicines"
+5️⃣ *View Cart* - Type "5" or "cart"
 6️⃣ *Customer Support* - Type "6" or "Connect me to support"
-7️⃣ *Upload Prescription* (image or PDF) - Send your file. To auto-attach, add a caption with your Order ID, e.g.: rx 12345 (also accepts "order 12345" or "prescription 12345"). Find your Order ID in your order confirmation message (e.g., "Order ID: #12345"). If unsure, type "support" and we’ll help link it.
+7️⃣ *Upload Prescription* (image or PDF) - Send your file. To auto-attach, add a caption with your Order ID, e.g.: rx 12345 (also accepts "order 12345" or "prescription 12345"). Find your Order ID in your order confirmation message. If unsure, type "support" and we’ll help link it.
+8️⃣ *Browse Healthcare Products* - Type "8" or "browse health products"
 
-Simply reply with a number (1-7) or describe what you need!`;
+Simply reply with a number (1-8) or describe what you need!`;
 
   const messageWithOptions = formatResponseWithOptions(helpMessage, isLoggedIn);
   await sendWhatsAppMessage(phoneNumber, messageWithOptions);
