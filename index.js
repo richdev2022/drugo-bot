@@ -1171,35 +1171,18 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     session.lastActivity = new Date();
     await session.save();
 
-    // Session idle-token handling: expire session after configured idle timeout (default 10 minutes)
-    // and update tokenLastUsed on activity. This keeps users logged in while they are active.
+    // Ensure there is a session token and update last-used timestamp on any activity.
+    // Tokens do not expire while present in session.
     if (session.state === 'LOGGED_IN') {
       try {
         session.data = session.data || {};
-        const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
-        const idleMs = idleMinutes * 60 * 1000;
-        const tokenLastUsedStr = session.data.tokenLastUsed;
-
-        if (tokenLastUsedStr) {
-          const tokenLastUsed = new Date(tokenLastUsedStr);
-          if (Date.now() - tokenLastUsed.getTime() > idleMs) {
-            // Session expired due to inactivity — log user out
-            session.state = 'NEW';
-            session.data = {};
-            await session.save();
-            await sendWhatsAppMessage(phoneNumber, '🔒 You have been automatically logged out due to inactivity. Please login again to continue.');
-            return;
-          }
-        }
-
-        // Ensure there is a session token and update last-used timestamp
         if (!session.data.token) {
           session.data.token = generateToken();
         }
         session.data.tokenLastUsed = new Date().toISOString();
         await session.save();
       } catch (err) {
-        console.error('Error handling session idle timeout:', err.message);
+        console.error('Error updating session token activity:', err.message);
       }
     }
 
@@ -1313,6 +1296,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         }
         session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
         session.data.doctorPageItems = pageData.items;
+        session.data.doctorSearchResults = pageData.items;
         session.data.lastDoctorSearch = { specialty, location };
         session.set('data', session.data);
         await session.save();
@@ -1374,7 +1358,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
           msg += `${idx + 1}. ${item.productName} x${item.quantity} — ₦${(item.subtotal).toLocaleString()}\n`;
         });
         msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
-        msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
+        msg += `\n�� *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
         msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
 
         await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
@@ -1655,13 +1639,8 @@ const isAuthenticatedSession = (session) => {
   try {
     if (!session) return false;
     const data = session.data || {};
-    // Require a token and check idle expiry window
-    if (!data.token) return false;
-    const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
-    const lastUsedStr = data.tokenLastUsed || session.lastActivity;
-    if (!lastUsedStr) return false;
-    const lastUsed = new Date(lastUsedStr);
-    return (Date.now() - lastUsed.getTime()) <= idleMinutes * 60 * 1000;
+    // Auth is based solely on the presence of a session token
+    return !!data.token;
   } catch (e) {
     return false;
   }
@@ -2255,6 +2234,7 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
     // Save pagination and last search
     session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
     session.data.doctorPageItems = pageData.items;
+    session.data.doctorSearchResults = pageData.items;
     session.data.lastDoctorSearch = { specialty: parameters.specialty, location };
     session.set('data', session.data);
     await session.save();
@@ -2299,13 +2279,14 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
     const doctorIndex = parseInt(parameters.doctorIndex) - 1;
     const dateTime = new Date(`${parameters.date}T${parameters.time}`);
 
-    if (!session.data.doctorSearchResults || !session.data.doctorSearchResults[doctorIndex]) {
+    const doctorList = (session.data.doctorPageItems || session.data.doctorSearchResults || []);
+    if (!doctorList[doctorIndex]) {
       const msg = formatResponseWithOptions("Please search for doctors first before booking an appointment.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const doctor = session.data.doctorSearchResults[doctorIndex];
+    const doctor = doctorList[doctorIndex];
     const result = await bookAppointment(session.data.userId, doctor.id, dateTime);
 
     // Notify support team
