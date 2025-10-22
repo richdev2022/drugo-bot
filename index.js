@@ -1171,35 +1171,18 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     session.lastActivity = new Date();
     await session.save();
 
-    // Session idle-token handling: expire session after configured idle timeout (default 10 minutes)
-    // and update tokenLastUsed on activity. This keeps users logged in while they are active.
+    // Ensure there is a session token and update last-used timestamp on any activity.
+    // Tokens do not expire while present in session.
     if (session.state === 'LOGGED_IN') {
       try {
         session.data = session.data || {};
-        const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
-        const idleMs = idleMinutes * 60 * 1000;
-        const tokenLastUsedStr = session.data.tokenLastUsed;
-
-        if (tokenLastUsedStr) {
-          const tokenLastUsed = new Date(tokenLastUsedStr);
-          if (Date.now() - tokenLastUsed.getTime() > idleMs) {
-            // Session expired due to inactivity — log user out
-            session.state = 'NEW';
-            session.data = {};
-            await session.save();
-            await sendWhatsAppMessage(phoneNumber, '🔒 You have been automatically logged out due to inactivity. Please login again to continue.');
-            return;
-          }
-        }
-
-        // Ensure there is a session token and update last-used timestamp
         if (!session.data.token) {
           session.data.token = generateToken();
         }
         session.data.tokenLastUsed = new Date().toISOString();
         await session.save();
       } catch (err) {
-        console.error('Error handling session idle timeout:', err.message);
+        console.error('Error updating session token activity:', err.message);
       }
     }
 
@@ -1655,13 +1638,8 @@ const isAuthenticatedSession = (session) => {
   try {
     if (!session) return false;
     const data = session.data || {};
-    // Require a token and check idle expiry window
-    if (!data.token) return false;
-    const idleMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '10', 10);
-    const lastUsedStr = data.tokenLastUsed || session.lastActivity;
-    if (!lastUsedStr) return false;
-    const lastUsed = new Date(lastUsedStr);
-    return (Date.now() - lastUsed.getTime()) <= idleMinutes * 60 * 1000;
+    // Auth is based solely on the presence of a session token
+    return !!data.token;
   } catch (e) {
     return false;
   }
