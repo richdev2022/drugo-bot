@@ -39,10 +39,12 @@ const sendWhatsAppMessage = async (phoneNumber, message) => {
     };
     if (isPermissionError(error)) {
       console.error(`❌ WhatsApp permission error when sending to ${phoneNumber}:`, log);
+      // Gracefully return without throwing to avoid breaking user flows
+      return { success: false, permissionError: true, error: error.response?.data?.error };
     } else {
       console.error(`❌ Error sending WhatsApp message to ${phoneNumber}:`, log);
+      throw error;
     }
-    throw error;
   }
 };
 
