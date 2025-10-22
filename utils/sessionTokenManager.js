@@ -116,43 +116,15 @@ const updateTokenLastUsed = async (phoneNumber, tokenType = 'token') => {
  * @returns {Object} { isValid: boolean, expiresIn: number (minutes), warnings: string[] }
  */
 const validateSessionValidity = (session) => {
-  const warnings = [];
-
   try {
-    if (!session || !session.data) {
-      return { isValid: false, expiresIn: 0, warnings: ['Invalid session'] };
+    if (!session || !session.data || !session.data.token) {
+      return { isValid: false, expiresIn: null, warnings: ['No session token'] };
     }
-
-    const now = new Date();
-    const lastActivityStr = session.lastActivity || session.data.tokenLastUsed;
-
-    if (!lastActivityStr) {
-      return { isValid: false, expiresIn: 0, warnings: ['No activity timestamp'] };
-    }
-
-    const lastActivity = new Date(lastActivityStr);
-    const idleMinutes = (now - lastActivity) / (1000 * 60);
-    const maxIdleMinutes = SESSION_CONFIG.idleTimeoutMinutes;
-
-    if (idleMinutes > maxIdleMinutes) {
-      return { isValid: false, expiresIn: 0, warnings: ['Session expired due to inactivity'] };
-    }
-
-    const minutesUntilExpiry = maxIdleMinutes - idleMinutes;
-
-    // Warn if session is expiring soon
-    if (minutesUntilExpiry < 5) {
-      warnings.push(`⚠️ Your session will expire in ${Math.round(minutesUntilExpiry)} minutes`);
-    }
-
-    return {
-      isValid: true,
-      expiresIn: Math.round(minutesUntilExpiry),
-      warnings
-    };
+    // Session with a token is considered valid; no idle expiry.
+    return { isValid: true, expiresIn: null, warnings: [] };
   } catch (error) {
     console.error('Error validating session:', error);
-    return { isValid: false, expiresIn: 0, warnings: ['Session validation error'] };
+    return { isValid: false, expiresIn: null, warnings: ['Session validation error'] };
   }
 };
 
