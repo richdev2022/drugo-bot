@@ -1379,7 +1379,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       await handleRegistrationOTPVerification(phoneNumber, session, otpMatch[0]);
       return;
     } else if (resendMatch) {
-      console.log(`🔄 Processing OTP resend request`);
+      console.log(`���� Processing OTP resend request`);
       await handleResendOTP(phoneNumber, session);
       return;
     } else if (session.state === 'REGISTERING' && session.data && session.data.waitingForOTPVerification) {
@@ -1761,7 +1761,7 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
           emailSent = false;
           console.error('Error sending OTP email via Brevo:', emailError);
           // Even if email send fails, allow user to verify with backup OTP from admin
-          const fallbackMsg = formatResponseWithOptions(`⚠️ **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
+          const fallbackMsg = formatResponseWithOptions(`⚠️ **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️�� **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
           await sendWhatsAppMessage(phoneNumber, fallbackMsg);
         }
 
@@ -2277,13 +2277,14 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
     const doctorIndex = parseInt(parameters.doctorIndex) - 1;
     const dateTime = new Date(`${parameters.date}T${parameters.time}`);
 
-    if (!session.data.doctorSearchResults || !session.data.doctorSearchResults[doctorIndex]) {
+    const doctorList = (session.data.doctorPageItems || session.data.doctorSearchResults || []);
+    if (!doctorList[doctorIndex]) {
       const msg = formatResponseWithOptions("Please search for doctors first before booking an appointment.", isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, msg);
       return;
     }
 
-    const doctor = session.data.doctorSearchResults[doctorIndex];
+    const doctor = doctorList[doctorIndex];
     const result = await bookAppointment(session.data.userId, doctor.id, dateTime);
 
     // Notify support team
