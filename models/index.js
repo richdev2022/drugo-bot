@@ -344,13 +344,30 @@ const Session = sequelize.define('Session', {
     type: DataTypes.ENUM('NEW', 'REGISTERING', 'REGISTERED', 'LOGGING_IN', 'LOGGED_IN', 'SUPPORT_CHAT'),
     defaultValue: 'NEW'
   },
+  token: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    comment: 'Session token for authentication'
+  },
+  userId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    comment: 'Reference to logged-in user'
+  },
   data: {
     type: DataTypes.JSONB,
     defaultValue: {}
   },
   lastActivity: {
     type: DataTypes.DATE,
-    defaultValue: DataTypes.NOW
+    allowNull: false,
+    defaultValue: () => new Date(),
+    comment: 'Last activity timestamp for idle timeout tracking'
+  },
+  loginTime: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'When the user logged in'
   },
   supportTeamId: {
     type: DataTypes.INTEGER,
@@ -361,7 +378,16 @@ const Session = sequelize.define('Session', {
     }
   }
 }, {
-  tableName: 'sessions'
+  tableName: 'sessions',
+  timestamps: true,
+  hooks: {
+    beforeUpdate: (session) => {
+      // Only auto-update lastActivity if it wasn't explicitly set
+      if (!session._lastActivityExplicitlySet) {
+        session.lastActivity = new Date();
+      }
+    }
+  }
 });
 
 // SupportTeam Model
@@ -809,16 +835,214 @@ const initializeDatabase = async () => {
     await sequelize.authenticate();
     console.log('✓ Database connection verified');
 
-    // Sync models
-    await sequelize.sync({ alter: true }); // Use alter to safely modify existing tables
-    console.log('✓ Database models synchronized successfully');
+    // Sync models - use alter to safely modify existing tables
+    console.log('🔄 Synchronizing database models...');
+    try {
+      await sequelize.sync({ alter: true });
+      console.log('✓ Database models synchronized successfully');
+    } catch (syncError) {
+      console.warn('⚠️  Sequelize sync encountered some issues:', syncError.message);
+      console.log('   Proceeding with manual column creation...');
+    }
+
+    // Ensure session table has token, userId, and loginTime columns
+    // This is CRITICAL - it verifies and creates missing columns
+    console.log('🔍 Ensuring session table schema...');
+    const columnsOk = await ensureSessionColumnsExist();
+    if (columnsOk) {
+      console.log('✅ Session table columns verified - ALL REQUIRED COLUMNS PRESENT');
+    } else {
+      console.error('❌ CRITICAL ERROR: Session table is missing required columns!');
+      console.error('   The bot CANNOT function without these columns.');
+      console.error('   Please run: npm run migrate-db');
+      console.error('   Or manually run the migration script in scripts/migrate-session-columns.js');
+      throw new Error('Session table missing required columns (token, userId, loginTime)');
+    }
 
     // Seed initial data if needed
     await seedInitialData();
     console.log('✓ Database initialization complete');
   } catch (error) {
     console.error('❌ Error synchronizing database models:', error.message);
+    console.error('   This may prevent the bot from functioning properly');
     throw error; // Re-throw to be handled by caller
+  }
+};
+
+// Ensure critical session columns exist with robust fallback
+const ensureSessionColumnsExist = async () => {
+  try {
+    console.log('🔍 Verifying session table schema...');
+    const queryInterface = sequelize.getQueryInterface();
+    const dialect = sequelize.getDialect();
+    
+    // Get table structure
+    let tableDesc;
+    try {
+      tableDesc = await queryInterface.describeTable('sessions');
+      console.log('✓ Session table exists, checking columns...');
+    } catch (describeError) {
+      console.error('❌ Could not describe sessions table:', describeError.message);
+      return false;
+    }
+
+    const columnsToAdd = [];
+    const missingColumns = [];
+    
+    // Check token column
+    if (!tableDesc.token) {
+      missingColumns.push('token');
+      console.log('  ⚠️  Missing: token column');
+      columnsToAdd.push({
+        name: 'token',
+        sqlType: dialect === 'postgres' ? 'VARCHAR(500)' : 'VARCHAR(500)',
+        definition: {
+          type: DataTypes.STRING(500),
+          allowNull: true,
+          comment: 'Session token for authentication'
+        }
+      });
+    } else {
+      console.log('  ✓ token column exists');
+    }
+    
+    // Check userId column
+    if (!tableDesc.userId) {
+      missingColumns.push('userId');
+      console.log('  ⚠️  Missing: userId column');
+      columnsToAdd.push({
+        name: 'userId',
+        sqlType: 'INTEGER',
+        definition: {
+          type: DataTypes.INTEGER,
+          allowNull: true,
+          comment: 'Reference to logged-in user'
+        }
+      });
+    } else {
+      console.log('  ✓ userId column exists');
+    }
+    
+    // Check loginTime column
+    if (!tableDesc.loginTime) {
+      missingColumns.push('loginTime');
+      console.log('  ⚠️  Missing: loginTime column');
+      columnsToAdd.push({
+        name: 'loginTime',
+        sqlType: dialect === 'postgres' ? 'TIMESTAMP WITH TIME ZONE' : 'DATETIME',
+        definition: {
+          type: DataTypes.DATE,
+          allowNull: true,
+          comment: 'When the user logged in'
+        }
+      });
+    } else {
+      console.log('  ✓ loginTime column exists');
+    }
+    
+    // Check lastActivity
+    if (!tableDesc.lastActivity) {
+      console.log('  ⚠️  Missing: lastActivity column');
+    } else if (tableDesc.lastActivity && tableDesc.lastActivity.allowNull === true) {
+      console.log('  ⚠️  lastActivity is nullable, should be NOT NULL');
+    } else {
+      console.log('  ✓ lastActivity is properly configured');
+    }
+
+    // Add missing columns using two-tier approach with retries
+    for (const column of columnsToAdd) {
+      let columnAdded = false;
+      
+      // Try Sequelize's addColumn first
+      try {
+        console.log(`  ↳ [${column.name}] Attempting Sequelize addColumn...`);
+        await queryInterface.addColumn('sessions', column.name, column.definition);
+        console.log(`    ✓ Successfully added ${column.name} via Sequelize`);
+        columnAdded = true;
+      } catch (seqError) {
+        console.warn(`    ⚠️  Sequelize failed: ${seqError.message}`);
+        
+        // Check if it's already exists error
+        if (seqError.message.includes('already exists') || seqError.message.includes('column already exists')) {
+          console.log(`    ℹ️  ${column.name} already exists (Sequelize says)`);
+          columnAdded = true;
+        }
+      }
+      
+      // If Sequelize failed and we're sure it doesn't exist, try raw SQL
+      if (!columnAdded) {
+        console.log(`  ↳ [${column.name}] Attempting raw PostgreSQL...`);
+        try {
+          // Use proper PostgreSQL syntax with escaped identifiers
+          const sql = `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "${column.name}" ${column.sqlType}`;
+          console.log(`    Executing: ${sql}`);
+          await sequelize.query(sql);
+          console.log(`    ✓ Successfully added ${column.name} via raw SQL`);
+          columnAdded = true;
+        } catch (sqlError) {
+          console.error(`    ❌ Raw SQL failed for ${column.name}: ${sqlError.message}`);
+          
+          // Try without IF NOT EXISTS for some PostgreSQL versions
+          if (sqlError.message.includes('syntax error')) {
+            try {
+              const sqlAlt = `ALTER TABLE "sessions" ADD COLUMN "${column.name}" ${column.sqlType}`;
+              console.log(`    Retrying without IF NOT EXISTS: ${sqlAlt}`);
+              await sequelize.query(sqlAlt);
+              console.log(`    ✓ Added ${column.name} (retry)`);
+              columnAdded = true;
+            } catch (retryError) {
+              if (retryError.message.includes('already exists') || retryError.message.includes('duplicate')) {
+                console.log(`    ℹ️  ${column.name} already exists in database`);
+                columnAdded = true;
+              } else {
+                console.error(`    ❌ Retry also failed: ${retryError.message}`);
+              }
+            }
+          }
+        }
+      }
+      
+      if (!columnAdded) {
+        console.warn(`    ⚠️  Could not confirm ${column.name} was added`);
+      }
+    }
+
+    // Verify all columns were created - CRITICAL STEP
+    console.log('  ↳ Verifying column creation (post-migration check)...');
+    try {
+      const verifyDesc = await queryInterface.describeTable('sessions');
+      const tokenExists = !!verifyDesc.token;
+      const userIdExists = !!verifyDesc.userId;
+      const loginTimeExists = !!verifyDesc.loginTime;
+      const lastActivityExists = !!verifyDesc.lastActivity;
+      
+      console.log(`  📊 Column verification results:`);
+      console.log(`    - token: ${tokenExists ? '✓ EXISTS' : '✗ MISSING'}`);
+      console.log(`    - userId: ${userIdExists ? '✓ EXISTS' : '✗ MISSING'}`);
+      console.log(`    - loginTime: ${loginTimeExists ? '✓ EXISTS' : '✗ MISSING'}`);
+      console.log(`    - lastActivity: ${lastActivityExists ? '✓ EXISTS' : '✗ MISSING'}`);
+      
+      if (tokenExists && userIdExists && loginTimeExists && lastActivityExists) {
+        console.log('✓✓✓ ALL REQUIRED COLUMNS ARE PRESENT ✓✓✓');
+        return true;
+      } else {
+        const stillMissing = [];
+        if (!tokenExists) stillMissing.push('token');
+        if (!userIdExists) stillMissing.push('userId');
+        if (!loginTimeExists) stillMissing.push('loginTime');
+        if (!lastActivityExists) stillMissing.push('lastActivity');
+        console.error(`❌ CRITICAL: Still missing columns: ${stillMissing.join(', ')}`);
+        console.error('   This will cause session issues. Please check database manually.');
+        return false;
+      }
+    } catch (verifyError) {
+      console.error('❌ Could not verify columns after migration:', verifyError.message);
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Error ensuring session columns exist:', error.message);
+    console.error('   Stack:', error.stack);
+    return false;
   }
 };
 

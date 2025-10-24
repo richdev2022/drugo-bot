@@ -5,8 +5,8 @@ const ENV = getEnv();
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const { sequelize, initializeDatabase } = require('./models');
-const { sendWhatsAppMessage, markMessageAsRead, getMediaInfo, downloadMedia, isPermissionError } = require('./config/whatsapp');
+const { sequelize, initializeDatabase, Session } = require('./models');
+const { sendWhatsAppMessage, markMessageAsRead, downloadMedia, isPermissionError, sendInteractiveMessage, sendListMessage, sendLocationRequestMessage, sendTypingIndicator, sendTypingStop } = require('./config/whatsapp');
 const adminService = require('./services/admin');
 const { processMessage, formatResponseWithOptions } = require('./services/nlp');
 const { parseNavigationCommand, buildPaginatedListMessage } = require('./utils/pagination');
@@ -19,6 +19,7 @@ const {
   placeOrder,
   trackOrder,
   searchDoctors,
+  searchDoctorsPaginated,
   bookAppointment
 } = require('./services/drugsng');
 const { processFlutterwavePayment, processPaystackPayment, verifyPayment } = require('./services/payment');
@@ -50,12 +51,23 @@ const {
 } = require('./services/doctorImages');
 
 const { uploadImage } = require('./services/cloudinary');
+
+// --- New AI/Voice Services ---
+// Note: These are placeholders. You need to implement the actual services.
+const { processUserInput } = require('./services/advancedNLP'); // Assuming this is your new advanced NLP
+const { VoiceProcessor } = require('./services/voiceProcessor');
+
 const app = express();
 const PORT = ENV.PORT || 3000;
 
 // Middleware
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// Initialize Voice Processor
+const voiceProcessor = new VoiceProcessor({
+  provider: process.env.VOICE_PROVIDER || 'whisper' // or your preferred provider
+});
 
 // Swagger / OpenAPI documentation setup (optional dependencies)
 let swaggerSpec = null;
@@ -430,142 +442,53 @@ app.post('/webhook', async (req, res) => {
             }
 
             const message = change.value.messages[0];
+            const contact = change.value.contacts?.[0];
+            const phoneNumber = message.from || contact?.wa_id;
+            const messageId = message.id;
+            const messageType = message.type;
 
-            if (message.type === 'text') {
-              const phoneNumber = message.from;
-              const messageText = message.text.body;
-              const messageId = message.id;
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`📨 New message from ${phoneNumber}`);
+            console.log(`Message Type: ${messageType}`);
+            console.log(`${'='.repeat(60)}\n`);
 
-              console.log(`📨 Received message from ${phoneNumber}: "${messageText}"`);
+            // Mark message as read
+            await markMessageAsRead(messageId);
 
-              // Mark message as read
-              try {
-                await markMessageAsRead(messageId);
-              } catch (readError) {
-                console.warn('Failed to mark message as read:', readError.message);
-              }
-
-              // Check if this is a support team message
-              const supportTeam = await sequelize.models.SupportTeam.findOne({
-                where: { phoneNumber }
-              });
-
-              try {
-                if (supportTeam) {
-                  // This is a message from support team
-                  console.log(`👨‍💼 Support team message from ${phoneNumber}`);
-                  await handleSupportTeamMessage(phoneNumber, messageText);
-                } else {
-                  // This is a message from customer
-                  console.log(`👤 Customer message from ${phoneNumber}`);
-                  await handleCustomerMessage(phoneNumber, messageText);
-                }
-              } catch (handleError) {
-                console.error(`❌ Error handling message from ${phoneNumber}:`, handleError.message);
-                // Try to send error message to user
-                try {
-                  await sendWhatsAppMessage(phoneNumber, 'Sorry, I encountered an error processing your message. Please try again.');
-                } catch (errorReplyError) {
-                  console.error('Failed to send error reply:', errorReplyError.message);
-                }
-              }
-            } else if (message.type === 'image' || message.type === 'document') {
-              const phoneNumber = message.from;
-              const messageId = message.id;
-
-              // Mark message as read
-              try {
-                await markMessageAsRead(messageId);
-              } catch (readError) {
-                console.warn('Failed to mark message as read:', readError.message);
-              }
-
-              try {
-                let mediaId = null;
-                let mimeType = null;
-                let filename = null;
-                let caption = '';
-
-                if (message.type === 'image') {
-                  mediaId = message.image.id;
-                  mimeType = message.image.mime_type || 'image/jpeg';
-                  caption = message.image.caption || '';
-                  filename = `prescription-${Date.now()}`;
-                } else {
-                  mediaId = message.document.id;
-                  mimeType = message.document.mime_type || 'application/pdf';
-                  filename = message.document.filename || `prescription-${Date.now()}.pdf`;
-                  caption = message.document.caption || message.caption || '';
-                }
-
-                // Validate allowed types
-                const allowed = ['image/jpeg','image/png','image/webp','image/gif','application/pdf'];
-                if (!allowed.includes(mimeType)) {
-                  await sendWhatsAppMessage(phoneNumber, 'Unsupported file type. Please send an image (JPG, PNG, WEBP, GIF) or a PDF.');
-                } else {
-                  // Download media from WhatsApp
-                  const { buffer } = await downloadMedia(mediaId);
-
-                  // Upload to Cloudinary immediately to avoid storing large files in session
-                  const uploadResult = await uploadImage(buffer, {
-                    folder: 'drugs-ng/prescriptions',
-                    filename,
-                    resourceType: 'auto'
-                  });
-
-                  // Run OCR to extract text from the uploaded file buffer (best-effort)
-                  let extractedText = null;
-                  try {
-                    const ocr = await extractPrescriptionFromBuffer(buffer);
-                    extractedText = ocr?.extractedText || null;
-                  } catch (ocrErr) {
-                    console.warn('OCR failed on incoming media:', ocrErr.message);
-                  }
-
-                  // Try to get order ID from caption like: "rx 123", "order 123", "prescription 123"
-                  const match = caption && caption.match(/(?:rx|order|prescription)\s*#?(\d+)/i);
-
-                  if (match && match[1]) {
-                    const orderId = match[1];
-                    try {
-                      const result = await savePrescription(orderId, uploadResult.url, extractedText);
-                      await sendWhatsAppMessage(phoneNumber, `✅ Prescription received and attached to order #${orderId}. Status: ${result.verificationStatus || 'Pending'}.`);
-                    } catch (err) {
-                      console.error('Attach prescription error:', err);
-                      await sendWhatsAppMessage(phoneNumber, `Prescription uploaded but could not attach to order #${orderId}: ${err.message}. You can link it later by replying: rx ${orderId}`);
-                    }
-                  } else {
-                    // Save URL in session as pending and ask user for order ID
-                    let session = await sequelize.models.Session.findOne({ where: { phoneNumber } });
-                    if (!session) {
-                      session = await sequelize.models.Session.create({ phoneNumber, state: 'NEW', data: {} });
-                    }
-                    session.data = session.data || {};
-                    session.data.pendingPrescriptionUrl = uploadResult.url;
-                    if (extractedText) {
-                      session.data.pendingPrescriptionExtractedText = extractedText;
-                    }
-                    await session.save();
-
-                    await sendWhatsAppMessage(phoneNumber, '📄 Prescription received.\n\nTo attach it to an order, reply now with your Order ID.\nExample: rx 12345\n\nNext time, you can auto-attach by adding a caption to your file: \n• rx 12345\n• order 12345\n• prescription 12345\n\nWhere to find your Order ID:\n• In your order confirmation message (look for "Order ID: #12345")\n• If you know it, check status with: track 12345\n• If you can’t find it, type "support" and we’ll help link it for you.');
-                  }
-                }
-              } catch (err) {
-                console.error('Media handling error:', err);
-                await sendWhatsAppMessage(phoneNumber, 'Sorry, there was a problem processing your file. Please try again or send a different file.');
-              }
+            // Route to the correct handler based on message type
+            switch (messageType) {
+              case 'text':
+                await handleTextMessage(message.text.body, phoneNumber, messageId);
+                break;
+              case 'audio':
+                await handleVoiceMessage(message, phoneNumber, messageId);
+                break;
+              case 'image':
+              case 'document':
+                await handleMediaMessage(message, phoneNumber, messageId);
+                break;
+              case 'location':
+                await handleLocationMessage(message, phoneNumber, messageId);
+                break;
+              case 'interactive':
+                await handleInteractiveMessage(message, phoneNumber, messageId);
+                break;
+              default:
+                console.warn(`Unknown message type: ${messageType}`);
+                await sendWhatsAppMessage(phoneNumber, `Sorry, I don't support ${messageType} messages yet.`);
             }
           }
         }
       }
-
       res.sendStatus(200);
     } else {
       res.sendStatus(404);
     }
   } catch (error) {
     console.error('Webhook error:', error);
-    res.sendStatus(500);
+    // It's crucial to send a 200 OK to WhatsApp, otherwise they will keep retrying and might disable the webhook.
+    // The error is logged for debugging.
+    res.sendStatus(200);
   }
 });
 
@@ -1161,29 +1084,54 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       session = await sequelize.models.Session.create({
         phoneNumber,
         state: 'NEW',
-        data: {}
+        data: {},
+        lastActivity: new Date()
       });
     } else {
       console.log(`📝 Found existing session for ${phoneNumber}, state: ${session.state}`);
+      // Diagnostic logging for session data
+      console.log(`   Session details:`);
+      console.log(`   - token column: ${session.token ? '✓ Present' : '✗ Empty'}`);
+      console.log(`   - data.token: ${session.data?.token ? '✓ Present' : '✗ Empty'}`);
+      console.log(`   - userId: ${session.userId || 'empty'}`);
+      console.log(`   - loginTime: ${session.loginTime || 'empty'}`);
+      console.log(`   - lastActivity: ${session.lastActivity ? new Date(session.lastActivity).toISOString() : 'empty'}`);
     }
 
-    // Update last activity
-    session.lastActivity = new Date();
-    await session.save();
+    // CRITICAL: Check for session expiry BEFORE updating lastActivity
+    // This ensures we detect idle timeout properly
+    const hadExpired = await handleSessionExpiry(phoneNumber, session);
+    if (hadExpired) {
+      // Session was expired and auto-logged out, reload fresh session
+      session = await sequelize.models.Session.findOne({
+        where: { phoneNumber }
+      });
+      console.log(`🔄 Reloaded session after expiry check`);
+    }
 
-    // Ensure there is a session token and update last-used timestamp on any activity.
-    // Tokens do not expire while present in session.
-    if (session.state === 'LOGGED_IN') {
-      try {
-        session.data = session.data || {};
-        if (!session.data.token) {
-          session.data.token = generateToken();
-        }
-        session.data.tokenLastUsed = new Date().toISOString();
-        await session.save();
-      } catch (err) {
-        console.error('Error updating session token activity:', err.message);
-      }
+    // Determine if user is authenticated
+    const isLoggedIn = isAuthenticatedSession(session);
+
+    // --- STRICT AUTHENTICATION GUARD ---
+    // If user is not logged in, only allow login, register, or greeting intents.
+    const nlpPreview = await processMessage(messageText, phoneNumber, session);
+    if (!isLoggedIn && !['login', 'register', 'greeting', 'help'].includes(nlpPreview.intent)) {
+        console.log(`[AUTH_GUARD] Blocked intent '${nlpPreview.intent}' for logged-out user.`);
+        await sendAuthRequiredMessage(phoneNumber, `access the '${nlpPreview.intent.replace(/_/g, ' ')}' feature`);
+        return;
+    }
+
+    // NOW update last activity to current time
+    // This must happen AFTER expiry check so we properly detect idle
+    session.lastActivity = new Date();
+    session._lastActivityExplicitlySet = true; // Mark as explicitly set to prevent hook override
+    // CRITICAL: No need to set data field - Sequelize will preserve it when we only update lastActivity
+    await session.save();
+    console.log(`⏰ Updated lastActivity to ${session.lastActivity.toISOString()}`);
+
+    // If logged in, ensure token exists
+    if (session.state === 'LOGGED_IN' && session.token) {
+      console.log(`✓ Session has valid token`);
     }
 
     // Check if in support chat
@@ -1216,8 +1164,8 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     if (session.data && session.data.pendingPrescriptionUrl) {
       try {
         const result = await savePrescription(orderId, session.data.pendingPrescriptionUrl, session.data.pendingPrescriptionExtractedText || null);
-        session.data.pendingPrescriptionUrl = null;
-        session.data.pendingPrescriptionExtractedText = null;
+        // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+        session.data = { ...session.data, pendingPrescriptionUrl: null, pendingPrescriptionExtractedText: null };
         await session.save();
         await sendWhatsAppMessage(phoneNumber, `✅ Prescription attached to order #${orderId}. Status: ${result.verificationStatus || 'Pending'}.`);
       } catch (err) {
@@ -1230,26 +1178,29 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     }
   }
 
+  // 🔴 CRITICAL: Reload session data EARLY to ensure we have latest state for all pagination checks
+  // This is needed because session.data might be cached from earlier operations
+  try {
+    await session.reload({ where: { phoneNumber } });
+    console.log(`🔄 Reloaded fresh session data. doctorSpecialtyPagination=${!!session.data.doctorSpecialtyPagination}, doctorPagination=${!!session.data.doctorPagination}, productPagination=${!!session.data.productPagination}, cartPagination=${!!session.data.cartPagination}`);
+  } catch (e) {
+    console.warn(`⚠️  Could not reload session data:`, e.message);
+  }
+
   // Pagination navigation for products list
   if (session.data && session.data.productPagination) {
     const { currentPage, totalPages, pageSize } = session.data.productPagination;
     const targetPage = parseNavigationCommand(messageText, currentPage, totalPages);
     if (targetPage) {
       const pageData = await listAllProductsPaginated(targetPage, pageSize);
-      session.data.productPagination = {
-        currentPage: pageData.page,
-        totalPages: pageData.totalPages,
-        pageSize: pageData.pageSize
-      };
-      session.data.productPageItems = pageData.items;
-      session.set('data', session.data);
-      await session.save();
+      // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+      session.data = { ...session.data, productPagination: { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize }, productPageItems: pageData.items };
       const isLoggedIn = isAuthenticatedSession(session);
-      const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '📦 Medicines', (product) => {
+      const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '📦 Medicines', 'products', (product) => {
         let s = `${product.name}`;
         if (product.price) s += `\n   Price: ₦${product.price}`;
         if (product.category) s += `\n   Category: ${product.category}`;
-        if (product.imageUrl) s += `\n   Image: ${product.imageUrl}`;
+        // if (product.imageUrl) s += `\n   Image: ${product.imageUrl}`; // Keep it clean for lists
         return s;
       });
       await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
@@ -1266,12 +1217,10 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     if (targetPage) {
       const start = (targetPage - 1) * pageSize;
       const items = DOCTOR_SPECIALTIES.slice(start, start + pageSize).map((s) => ({ name: s }));
-      session.data.doctorSpecialtyPagination = { currentPage: targetPage, totalPages, pageSize };
-      session.data.doctorSpecialtyPageItems = items;
-      session.set('data', session.data);
-      await session.save();
-      const msg = buildPaginatedListMessage(items, targetPage, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
-      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg + '\nType a number to choose a specialty.', isLoggedIn));
+      // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+      session.data = { ...session.data, doctorSpecialtyPagination: { currentPage: targetPage, totalPages, pageSize }, doctorSpecialtyPageItems: items };
+      const msg = buildPaginatedListMessage(items, targetPage, totalPages, '🗂️ Doctor Specialties', 'doctor_specialties', (it) => it.name);
+      await sendWhatsAppMessage(phoneNumber, msg + '\nType a number to choose a specialty.');
       return;
     }
 
@@ -1279,35 +1228,57 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     if (selectMatch) {
       const idx = parseInt(selectMatch[0], 10) - 1;
       const items = session.data.doctorSpecialtyPageItems || [];
-      if (items[idx] && items[idx].name) {
+      console.log(`🏥 Doctor specialty selection: user input=${selectMatch[0]}, idx=${idx}, items count=${items.length}`);
+      
+      if (idx >= 0 && idx < items.length && items[idx] && items[idx].name) {
         const specialty = items[idx].name;
+        console.log(`✅ Specialty selected: ${specialty}`);
+        
         // Clear specialty pagination state
-        delete session.data.doctorSpecialtyPagination;
-        delete session.data.doctorSpecialtyPageItems;
-        session.set('data', session.data);
+        // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+        const newData = { ...session.data };
+        delete newData.doctorSpecialtyPagination;
+        delete newData.doctorSpecialtyPageItems;
+        session.data = newData;
         await session.save();
+        
         // Proceed to doctor search for chosen specialty
         const pageSize = 5;
         const location = 'Lagos';
-        const pageData = await searchDoctorsPaginated(specialty, location, 1, pageSize);
-        if (!pageData.items || pageData.items.length === 0) {
-          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any ${specialty} in ${location}. Try another specialty.`, isLoggedIn));
-          return;
+        try {
+          const pageData = await searchDoctorsPaginated(specialty, location, 1, pageSize);
+          if (!pageData || !pageData.items || pageData.items.length === 0) {
+            console.warn(`⚠️  No doctors found for specialty: ${specialty} in ${location}`);
+            await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any ${specialty} in ${location}. Try another specialty.`, isLoggedIn));
+            return;
+          }
+          
+          // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+          session.data = { 
+            ...session.data, 
+            doctorPagination: { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize },
+            doctorPageItems: pageData.items,
+            doctorSearchResults: pageData.items,
+            lastDoctorSearch: { specialty, location }
+          };
+          await session.save();
+          
+          const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${specialty} doctors in ${location}:`, 'doctors', (doctor) => {
+            let s = `Dr. ${doctor.name}`;
+            if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
+            if (doctor.location) s += `\n   Location: ${doctor.location}`;
+            if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
+            return s;
+          });
+          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+        } catch (err) {
+          console.error(`❌ Error searching doctors for specialty ${specialty}:`, err.message);
+          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we encountered an error searching for ${specialty} doctors. Please try again.`, isLoggedIn));
         }
-        session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
-        session.data.doctorPageItems = pageData.items;
-        session.data.doctorSearchResults = pageData.items;
-        session.data.lastDoctorSearch = { specialty, location };
-        session.set('data', session.data);
-        await session.save();
-        const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${specialty} doctors in ${location}:`, (doctor) => {
-          let s = `Dr. ${doctor.name}`;
-          if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
-          if (doctor.location) s += `\n   Location: ${doctor.location}`;
-          if (doctor.rating) s += `\n   Rating: ${doctor.rating}/5`;
-          return s;
-        });
-        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
+        return;
+      } else {
+        console.warn(`❌ Invalid specialty selection: idx=${idx}, items=[${items.map(i => i.name).join(', ')}]`);
+        await sendWhatsAppMessage(phoneNumber, `Please select a valid specialty number between 1 and ${items.length}.`);
         return;
       }
     }
@@ -1320,16 +1291,19 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
     if (targetPage) {
       const lastSearch = session.data.lastDoctorSearch || {};
       const pageData = await searchDoctorsPaginated(lastSearch.specialty || '', lastSearch.location || '', targetPage, pageSize);
-      session.data.doctorPagination = {
-        currentPage: pageData.page,
-        totalPages: pageData.totalPages,
-        pageSize: pageData.pageSize
+      // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+      session.data = {
+        ...session.data,
+        doctorPagination: {
+          currentPage: pageData.page,
+          totalPages: pageData.totalPages,
+          pageSize: pageData.pageSize
+        },
+        doctorPageItems: pageData.items
       };
-      session.data.doctorPageItems = pageData.items;
-      session.set('data', session.data);
       await session.save();
       const isLoggedInNow = isAuthenticatedSession(session);
-      const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', (doctor) => {
+      const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '👨‍⚕️ Doctors', 'doctors', (doctor) => {
         let s = `Dr. ${doctor.name}`;
         if (doctor.specialty) s += `\n   Specialty: ${doctor.specialty}`;
         if (doctor.location) s += `\n   Location: ${doctor.location}`;
@@ -1349,8 +1323,8 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       try {
         const userId = session.data.userId;
         const result = await require('./services/orderManagement').getCartPaginated(userId, { page: targetPage, pageSize });
-        session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
-        session.set('data', session.data);
+        // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+        session.data = { ...session.data, cartPagination: { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize } };
         await session.save();
 
         let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
@@ -1360,8 +1334,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
         msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
         msg += `\n�� *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
         msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
-
-        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isAuthenticatedSession(session)));
+        await sendWhatsAppMessage(phoneNumber, msg);
         return;
       } catch (err) {
         console.error('Cart pagination error:', err);
@@ -1385,20 +1358,27 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       return;
     } else if (session.state === 'REGISTERING' && session.data && session.data.waitingForOTPVerification) {
       // User is in REGISTERING state but entered invalid input
-      const errorMsg = formatResponseWithOptions("❌ Please enter your 4-digit OTP code. If you need to resend the OTP, type 'resend'.", false);
-      await sendWhatsAppMessage(phoneNumber, errorMsg);
+      await sendWhatsAppMessage(phoneNumber, "❌ Please enter your 4-digit OTP code. If you need to resend the OTP, type 'resend'.");
       return;
     }
   }
 
   // Process with NLP
   console.log(`🤖 Processing with NLP...`);
-  const isLoggedIn = isAuthenticatedSession(session);
   const nlpResult = await processMessage(messageText, phoneNumber, session);
   const { intent, parameters, fulfillmentText } = nlpResult;
   console.log(`✨ NLP Result: intent="${intent}", source="${nlpResult.source}", confidence=${nlpResult.confidence}`);
 
-    // Handle different intents
+  // --- STRICT AUTHENTICATION GUARD (Corrected Position) ---
+  // If user is not logged in, only allow login, register, or greeting intents.
+  const allowedLoggedOutIntents = ['login', 'register', 'greeting', 'help'];
+  if (!isLoggedIn && !allowedLoggedOutIntents.includes(intent)) {
+      console.log(`[AUTH_GUARD] Blocked intent '${intent}' for logged-out user.`);
+      await sendAuthRequiredMessage(phoneNumber, `access the '${intent.replace(/_/g, ' ')}' feature`);
+      return;
+  }
+
+  // Handle different intents
     console.log(`🎯 Handling intent: ${intent}`);
     switch (intent) {
       case 'greeting':
@@ -1423,7 +1403,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'search_products':
         console.log(`🔍 Handling product search`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'search for products');
         } else {
           await handleProductSearch(phoneNumber, session, parameters);
         }
@@ -1432,7 +1412,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'add_to_cart':
         console.log(`🛒 Handling add to cart`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'add items to your cart');
         } else {
           await handleAddToCart(phoneNumber, session, parameters);
         }
@@ -1441,7 +1421,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'view_cart':
         console.log(`🧺 Handling view cart`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'view your cart');
         } else {
           await handleViewCart(phoneNumber, session, parameters);
         }
@@ -1450,7 +1430,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'place_order':
         console.log(`📦 Handling place order`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'place an order');
         } else {
           await handlePlaceOrder(phoneNumber, session, parameters);
         }
@@ -1458,13 +1438,13 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
 
       case 'prescription_upload':
         console.log(`📄 Handling prescription upload prompt`);
-        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Please upload your prescription document (image or PDF) by sending it as an attachment. You can caption it with your Order ID, e.g., rx 12345.', isLoggedIn));
+        await sendWhatsAppMessage(phoneNumber, 'Please upload your prescription document (image or PDF) by sending it as an attachment. You can caption it with your Order ID, e.g., rx 12345.');
         break;
 
       case 'track_order':
         console.log(`📍 Handling track order`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'track an order');
         } else {
           await handleTrackOrder(phoneNumber, session, parameters);
         }
@@ -1473,7 +1453,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'search_doctors':
         console.log(`👨‍⚕️ Handling doctor search`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'search for doctors');
         } else {
           await handleDoctorSearch(phoneNumber, session, parameters);
         }
@@ -1482,7 +1462,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'book_appointment':
         console.log(`📅 Handling book appointment`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'book an appointment');
         } else {
           await handleBookAppointment(phoneNumber, session, parameters);
         }
@@ -1491,7 +1471,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'payment':
         console.log(`💳 Handling payment`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'make a payment');
         } else {
           await handlePayment(phoneNumber, session, parameters);
         }
@@ -1510,7 +1490,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'diagnostic_tests':
         console.log(`🔬 Handling diagnostic tests search`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'search for diagnostic tests');
         } else {
           await handleDiagnosticTestSearch(phoneNumber, session, parameters);
         }
@@ -1519,7 +1499,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
       case 'healthcare_products':
         console.log(`🛒 Handling healthcare products browse`);
         if (!isLoggedIn) {
-          await sendAuthRequiredMessage(phoneNumber);
+          await sendAuthRequiredMessage(phoneNumber, 'browse healthcare products');
         } else {
           await handleHealthcareProductBrowse(phoneNumber, session, parameters);
         }
@@ -1527,8 +1507,7 @@ const handleCustomerMessage = async (phoneNumber, messageText) => {
 
       default:
         console.log(`❓ Unknown intent, sending fallback response`);
-        const responseWithOptions = formatResponseWithOptions(fulfillmentText || "I'm not sure how to help with that. Type 'help' for menu.", isLoggedIn);
-        await sendWhatsAppMessage(phoneNumber, responseWithOptions);
+        await sendInteractiveMessage(phoneNumber, fulfillmentText || "I'm not sure how to help with that. Type 'help' for menu.", getStandardButtons(isLoggedIn));
     }
     console.log(`✅ Successfully processed message from ${phoneNumber}\n`);
   } catch (error) {
@@ -1634,60 +1613,177 @@ const handleSupportCommand = async (supportTeam, commandText) => {
 };
 
 // Send authentication required message
-// Helper to check if a session is authenticated using token validity
+// Helper to check if a session is authenticated using token validity AND idle timeout
 const isAuthenticatedSession = (session) => {
   try {
-    if (!session) return false;
-    const data = session.data || {};
-    // Auth is based solely on the presence of a session token
-    return !!data.token;
+    if (!session) {
+      console.log(`✗ Session check failed: session is null`);
+      return false;
+    }
+    
+    // Must have token (check both dedicated column and data object for backward compatibility)
+    const tokenInColumn = !!session.token;
+    const tokenInData = !!(session.data && session.data.token);
+    const hasToken = tokenInColumn || tokenInData;
+    
+    if (!hasToken) {
+      console.log(`✗ [${session.phoneNumber}] Session check FAILED: NO TOKEN`);
+      console.log(`  - token column: ${session.token || 'empty'}`);
+      console.log(`  - data.token: ${session.data?.token || 'empty'}`);
+      return false;
+    }
+    
+    if (session.state !== 'LOGGED_IN') {
+      console.log(`✗ [${session.phoneNumber}] Session check FAILED: state is "${session.state}" (not LOGGED_IN)`);
+      return false;
+    }
+    
+    // Check if session has been idle for more than configured timeout (default 20 minutes)
+    const SESSION_IDLE_TIMEOUT_MINUTES = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '20', 10);
+    const SESSION_IDLE_TIMEOUT_MS = SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;
+    
+    const lastActivity = session.lastActivity ? new Date(session.lastActivity).getTime() : null;
+    
+    if (!lastActivity) {
+      console.log(`✗ [${session.phoneNumber}] Session check FAILED: no lastActivity timestamp`);
+      return false;
+    }
+    
+    const now = new Date().getTime();
+    const idleTime = now - lastActivity;
+    
+    if (idleTime > SESSION_IDLE_TIMEOUT_MS) {
+      const idleMinutes = Math.round(idleTime / 60000);
+      console.log(`⏱️  [${session.phoneNumber}] Session EXPIRED: Idle for ${idleMinutes}m (timeout: ${SESSION_IDLE_TIMEOUT_MINUTES}m)`);
+      return false;
+    }
+    
+    // Session is valid and active
+    const idleSeconds = Math.round(idleTime / 1000);
+    const tokenSource = tokenInColumn ? 'database column' : 'data.token';
+    console.log(`✓ [${session.phoneNumber}] Session VALID - Token in ${tokenSource}, state=LOGGED_IN, idle=${idleSeconds}s`);
+    return true;
   } catch (e) {
+    console.error('❌ Error checking session validity:', e);
     return false;
   }
 };
 
-const sendAuthRequiredMessage = async (phoneNumber) => {
-  const authMessage = `🔐 *Authentication Required*\n\nYou need to be logged in to access this feature.\n\nPlease login with your email and password:\nExample: login john@example.com mypassword\n\nOr register if you're new:\nExample: register John Doe john@example.com mypassword\n\n📋 Type "help" to see all options.`;
-  await sendWhatsAppMessage(phoneNumber, authMessage);
+// Helper to auto-invalidate session if idle, and send notification
+const handleSessionExpiry = async (phoneNumber, session) => {
+  try {
+    if (!session) {
+      console.log(`[${phoneNumber}] No session to check for expiry`);
+      return false;
+    }
+    
+    // Check token source for debugging
+    const hasTokenInColumn = !!session.token;
+    const hasTokenInData = !!(session.data && session.data.token);
+    const tokenSource = hasTokenInColumn ? 'database column' : hasTokenInData ? 'data.token' : 'NO TOKEN';
+    
+    console.log(`🔍 Checking expiry for [${phoneNumber}]: state=${session.state}, token_source=${tokenSource}`);
+    console.log(`   lastActivity=${session.lastActivity ? new Date(session.lastActivity).toISOString() : 'NULL'}`);
+    
+    // If session is still valid, return early - no expiry needed
+    if (isAuthenticatedSession(session)) {
+      console.log(`✓ Session still valid, skipping expiry`);
+      return false;
+    }
+    
+    // Session failed validation - but only invalidate if it was logged in
+    // We don't want to invalidate NEW sessions that never had a token
+    if (session.state === 'LOGGED_IN' || hasTokenInColumn || hasTokenInData) {
+      console.log(`🔒 Auto-invalidating expired session for [${phoneNumber}]`);
+      console.log(`   Previous: state=${session.state}, token_source=${tokenSource}`);
+      
+      // Clear all session data
+      session.state = 'NEW';
+      session.token = null;
+      session.userId = null;
+      session.loginTime = null;
+      session.data = {};
+      session._lastActivityExplicitlySet = true;
+      await session.save();
+      
+      console.log(`   ✓ Session reset to NEW state`);
+      
+      // Send expiry message
+      const expiredMessage = `⏱️ *Session Expired*\n\nYour session has been idle for more than 20 minutes and has been closed for security.\n\nTo continue, please login again:\nExample: login john@example.com mypassword`;
+      await sendWhatsAppMessage(phoneNumber, expiredMessage);
+      return true;
+    } else {
+      console.log(`ℹ️  Session not in expirable state (state=${session.state}, no token), skipping reset`);
+      return false;
+    }
+  } catch (err) {
+    console.error('❌ Error handling session expiry:', err);
+  }
+  return false;
 };
 
+const sendAuthRequiredMessage = async (phoneNumber, feature = 'this feature') => {
+  const bodyText = `🔐 *Authentication Required*\n\nYou need to be logged in to ${feature}.`;
+  const buttons = [{ id: 'show_login_prompt', title: '🔒 Login' }, { id: 'show_register_prompt', title: '📝 Register' }, { id: 'show_help_menu', title: '📋 Main Menu' }];
+  await sendInteractiveMessage(phoneNumber, bodyText, buttons);
+};
 // Handle logout
 const handleLogout = async (phoneNumber, session) => {
   console.log(`���� Handling logout for ${phoneNumber}`);
   try {
     session.state = 'NEW';
+    session.token = null;
+    session.userId = null;
+    session.loginTime = null;
     session.data = {};
+    session.changed('token', true);
+    session.changed('userId', true);
+    session.changed('loginTime', true);
     await session.save();
 
-    const logoutMessage = "�� You have been logged out successfully.\n\nType 'help' to get started again or 'login' to sign back in.";
-    await sendWhatsAppMessage(phoneNumber, logoutMessage);
+    await sendTypingIndicator(phoneNumber);
+    const bodyText = "👋 *See you soon!* 🌟\n\nYou have been logged out successfully. Your data is safe with us.\n\n💭 *What would you like to do?*";
+    const buttons = [
+      { id: 'show_login_prompt', title: '🔐 Login Again' },
+      { id: 'show_register_prompt', title: '✍️ Create Account' },
+      { id: 'show_help_menu', title: '📋 Main Menu' }
+    ];
+    await sendInteractiveMessage(phoneNumber, bodyText, buttons);
+    await sendTypingStop(phoneNumber);
   } catch (error) {
     console.error('Error during logout:', error);
-    await sendWhatsAppMessage(phoneNumber, "Sorry, there was an error logging you out. Please try again.");
+    await sendTypingStop(phoneNumber);
+    await sendWhatsAppMessage(phoneNumber, "❌ Sorry, there was an error logging you out. Please try again or contact support.");
   }
 };
 
 // Handle greeting
 const handleGreeting = async (phoneNumber, session) => {
   console.log(`👋 Handling greeting for ${phoneNumber}, session state: ${session.state}`);
-  if (session.state === 'NEW') {
-    const greetingMessage = "Welcome to Drugs.ng! I'm Drugo — your helpful assistant. Are you a new user? Reply 'register' to sign up or 'login' if you already have an account."
-    console.log(`📤 Sending new user greeting`);
-    await sendWhatsAppMessage(phoneNumber, greetingMessage);
-  } else {
-    const welcomeBackMessage = `Welcome back! Drugo here. How can I assist you today? You can ask me about medicines, doctors, orders, or type 'help' for assistance.`;
+  await sendTypingIndicator(phoneNumber);
+  
+  if (isAuthenticatedSession(session)) {
     console.log(`📤 Sending returning user welcome`);
-    await sendWhatsAppMessage(phoneNumber, welcomeBackMessage);
+    await handleHelp(phoneNumber, true);
+  } else {
+    const bodyText = "👋 *Welcome to Drugs.ng!* 🏥\n\nI'm *Drugo*, your AI-powered health assistant. I'm here to help you:\n\n💊 Shop medicines & health products\n👨‍⚕️ Find & book doctor appointments\n🔬 Schedule lab tests\n📦 Track your orders\n💬 Chat with our support team\n\n✨ *Ready to get started?*";
+    const buttons = [
+        { id: 'show_login_prompt', title: '🔐 Login' },
+        { id: 'show_register_prompt', title: '✍️ Register' },
+    ]
+    console.log(`📤 Sending new user greeting with interactive buttons.`);
+    await sendInteractiveMessage(phoneNumber, bodyText, buttons);
   }
+  await sendTypingStop(phoneNumber);
 };
 
 // Handle registration
 const handleRegistration = async (phoneNumber, session, parameters) => {
-  if (session.state === 'NEW' || session.state === 'REGISTERING') {
+  if (session.state === 'NEW' || session.state === 'REGISTERING' || session.state === 'LOGGING_IN') {
     // If we have all required parameters (name, email, password)
     if (parameters.name && parameters.email && parameters.password) {
       const userData = {
-        name: sanitizeInput(parameters.name),
+        name: sanitizeInput(parameters.name).replace(/\b\w/g, l => l.toUpperCase()), // Capitalize name
         email: sanitizeInput(parameters.email).toLowerCase(),
         password: sanitizeInput(parameters.password),
         phoneNumber: normalizePhoneNumber(phoneNumber)
@@ -1696,8 +1792,7 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
       // Validate input
       const validation = isValidRegistrationData(userData);
       if (!validation.valid) {
-        const errorMsg = formatResponseWithOptions(`Registration failed: ${validation.error}`, false);
-        await sendWhatsAppMessage(phoneNumber, errorMsg);
+        await sendWhatsAppMessage(phoneNumber, `❌ Registration failed: ${validation.error}`);
         return;
       }
 
@@ -1708,8 +1803,7 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
         });
 
         if (existingUser) {
-          const errorMsg = formatResponseWithOptions(`❌ This email is already registered. Type 'login' to sign in or use a different email.`, false);
-          await sendWhatsAppMessage(phoneNumber, errorMsg);
+          await sendInteractiveMessage(phoneNumber, `❌ This email is already registered.`, [{ id: 'show_login_prompt', title: '🔒 Login Instead' }]);
           return;
         }
       } catch (error) {
@@ -1756,14 +1850,11 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
         const { sendOTPEmail } = require('./config/brevo');
         try {
           await sendOTPEmail(userData.email, otp, userData.name);
-          const otpMsg = formatResponseWithOptions(`✅ OTP has been sent to ${userData.email}. Please reply with your 4-digit code to complete registration. The code is valid for 5 minutes.`, false);
-          await sendWhatsAppMessage(phoneNumber, otpMsg);
+          await sendWhatsAppMessage(phoneNumber, `✅ An OTP has been sent to *${userData.email}*.\n\nPlease reply with the 4-digit code to complete your registration. The code is valid for 5 minutes.`);
         } catch (emailError) {
           emailSent = false;
           console.error('Error sending OTP email via Brevo:', emailError);
-          // Even if email send fails, allow user to verify with backup OTP from admin
-          const fallbackMsg = formatResponseWithOptions(`⚠️ **Failed to send OTP via email.** The email service is temporarily unavailable.\n\n✅ **Don't worry! You can still complete registration:**\n\n1️⃣ **From Admin**: Contact our support team - they can provide you a backup OTP code\n2️⃣ **Enter your code**: Reply with the 4-digit OTP code (from email or provided by admin)\n3️⃣ **Or retry**: Try registering again later when email service is restored\n\nYour registration data is secure. The OTP code we generated is stored in our database and is valid for 5 minutes.\n\nNeed help? Type 'support' to contact our team.`, false);
-          await sendWhatsAppMessage(phoneNumber, fallbackMsg);
+          await sendWhatsAppMessage(phoneNumber, `⚠️ We couldn't send an OTP to your email right now. Please contact support by typing "support" to get a backup code.`);
         }
 
         // Store that we're waiting for OTP verification (even if email send failed)
@@ -1774,33 +1865,36 @@ const handleRegistration = async (phoneNumber, session, parameters) => {
 
       } catch (error) {
         console.error('Error in OTP generation/verification setup:', error);
-        const errorMsg = formatResponseWithOptions(`❌ Failed to process registration. Please try again later or contact support.`, false);
-        await sendWhatsAppMessage(phoneNumber, errorMsg);
+        await sendWhatsAppMessage(phoneNumber, `❌ We couldn't process your registration right now. Please try again later.`);
         session.data.registrationData = null;
         session.data.waitingForOTPVerification = false;
         await session.save();
       }
     } else {
       // Request missing parameters
-      let message = "📝 To register, please send your details in one message:\n";
-      message += "Example: 'register John Doe john@example.com mypassword'\n\n";
-      message += "Requirements:\n";
-      if (!parameters.name) message += "• Full name (at least 2 characters)\n";
-      if (!parameters.email) message += "• Email address (valid email format)\n";
-      if (!parameters.password) message += "• Password (at least 6 characters)\n";
-
-      const msgWithOptions = formatResponseWithOptions(message, false);
-      await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+      let message = "📝 To get started, please provide your details in a single message.\n\n";
+      message += "Example: `register John Doe john@example.com MyPassword123`\n\n";
+      message += "We need your:\n";
+      if (!parameters.name) message += "• Full Name\n";
+      if (!parameters.email) message += "• Email Address\n";
+      if (!parameters.password) message += "• A secure password (at least 6 characters)\n";
+      await sendWhatsAppMessage(phoneNumber, message);
     }
   } else {
-    const msg = formatResponseWithOptions("You're already registered. Type 'help' to see available services.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendTypingIndicator(phoneNumber);
+    const bodyText = "✅ *Already Logged In!* 🎉\n\nYou have an active session. No need to register again.\n\n💡 What would you like to do next?";
+    const buttons = [
+      { id: 'show_help_menu', title: '📋 Main Menu' },
+      { id: 'show_logout_prompt', title: '🔐 Logout' }
+    ];
+    await sendInteractiveMessage(phoneNumber, bodyText, buttons);
+    await sendTypingStop(phoneNumber);
   }
 };
 
 // Handle login
 const handleLogin = async (phoneNumber, session, parameters) => {
-  if (session.state === 'NEW' || session.state === 'LOGGING_IN') {
+  if (session.state === 'NEW' || session.state === 'LOGGING_IN' || session.state === 'REGISTERING') {
     session.state = 'LOGGING_IN';
     await session.save();
 
@@ -1815,45 +1909,105 @@ const handleLogin = async (phoneNumber, session, parameters) => {
         // Validate credentials
         const validation = isValidLoginData(credentials);
         if (!validation.valid) {
-          const errorMsg = formatResponseWithOptions(`❌ Login failed: ${validation.error}`, false);
-          await sendWhatsAppMessage(phoneNumber, errorMsg);
+          await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ Login failed: ${validation.error}`, false));
           return;
         }
 
         // Login user
         const result = await loginUser(credentials);
 
-        // Update session - set full data object to ensure Sequelize detects changes to JSONB
+        // Generate or use provided token
+        const sessionToken = result.token || generateToken();
+        console.log(`🔐 Generated session token for login: ${sessionToken.substring(0, 10)}...`);
+
+        // Update session with proper token storage
         session.state = 'LOGGED_IN';
+        session.token = sessionToken;  // Store in dedicated token column
+        session.userId = result.userId;  // Store user reference
+        session.loginTime = new Date();  // Track login time
+        session.lastActivity = new Date();  // Reset activity timer
+        session._lastActivityExplicitlySet = true; // Mark to prevent hook override
         session.data = Object.assign(session.data || {}, {
           userId: result.userId,
-          token: result.token || generateToken(),
-          tokenLastUsed: new Date().toISOString()
+          token: sessionToken  // Also keep in data for compatibility
         });
-        session.set('data', session.data);
+        
+        // Explicitly tell Sequelize about the changes
+        session.changed('token', true);
+        session.changed('userId', true);
+        session.changed('loginTime', true);
+        session.changed('data', true);
+        session.changed('state', true);
+        session.changed('lastActivity', true);
+        
+        console.log(`📝 BEFORE SAVE: state=LOGGED_IN, token=${sessionToken.substring(0, 10)}..., userId=${result.userId}, lastActivity=${session.lastActivity.toISOString()}`);
         await session.save();
+        console.log(`💾 Session saved to database`);
+        
+        // CRITICAL: Verify token was actually persisted in the database
+        const verifySession = await sequelize.models.Session.findOne({ where: { phoneNumber } });
+        if (!verifySession) {
+          throw new Error('❌ CRITICAL: Session disappeared after save!');
+        }
+        
+        const tokenInColumn = !!verifySession.token;
+        const tokenInData = !!(verifySession.data && verifySession.data.token);
+        const verifyToken = verifySession.token || (verifySession.data && verifySession.data.token);
+        
+        console.log(`✅ Verification from DB:`);
+        console.log(`   - token column: ${tokenInColumn ? '✓ Present' : '✗ Missing'} ${verifySession.token ? `(${verifySession.token.substring(0, 10)}...)` : ''}`);
+        console.log(`   - data.token: ${tokenInData ? '✓ Present' : '✗ Missing'} ${verifySession.data?.token ? `(${verifySession.data.token.substring(0, 10)}...)` : ''}`);
+        console.log(`   - state: ${verifySession.state}`);
+        console.log(`   - userId: ${verifySession.userId}`);
+        
+        // If token is missing after save, try again
+        if (!verifyToken) {
+          console.warn(`⚠️  WARNING: Token not persisted in DB! Attempting retry...`);
+          verifySession.token = sessionToken;
+          verifySession.data = Object.assign(verifySession.data || {}, { token: sessionToken });
+          verifySession.changed('token', true);
+          verifySession.changed('data', true);
+          await verifySession.save();
+          console.log(`🔄 Retried token save`);
+          
+          // Verify again
+          const retrySession = await sequelize.models.Session.findOne({ where: { phoneNumber } });
+          const retryToken = retrySession.token || (retrySession.data && retrySession.data.token);
+          console.log(`🔄 After retry - token in DB: ${retryToken ? '✓ YES' : '✗ NO'}`);
+        }
 
-        const successMsg = formatResponseWithOptions(`✅ Login successful! Welcome back to Drugs.ng. Type 'help' to see what you can do.`, true);
-        await sendWhatsAppMessage(phoneNumber, successMsg);
+        await sendTypingIndicator(phoneNumber);
+        const bodyText = "🎉 *Welcome back!* 👋\n\n✅ You've successfully logged in.\n\n🚀 You can now:\n💊 Browse & buy medicines\n👨‍⚕️ Find & book doctors\n🔬 Schedule lab tests\n📦 Track orders\n💬 Chat with support\n\n📋 Ready to explore? Select an option below:";
+        const buttons = [
+          { id: 'show_help_menu', title: '📋 Main Menu' },
+          { id: 'search_products', title: '💊 Browse Medicines' }
+        ];
+        await sendInteractiveMessage(phoneNumber, bodyText, buttons);
+        await sendTypingStop(phoneNumber);
       } catch (error) {
         console.error('Login error:', error);
         const errorMessage = handleApiError(error, 'login').message;
-        const errorMsg = formatResponseWithOptions(`❌ Login failed: ${errorMessage}`, false);
-        await sendWhatsAppMessage(phoneNumber, errorMsg);
+        await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ Login failed: ${errorMessage}`, false));
       }
     } else {
       // Request missing parameters
-      let message = "���� To login, send your credentials in one message:\n";
-      message += "Example: 'login john@example.com mypassword'\n\n";
+      let message = "🔐 To log in, please send your credentials in one message.\n\n";
+      message += "Example: `login john@example.com mypassword`\n\n";
+      message += "📧 Your email and password are required.";
       if (!parameters.email) message += "• Email address\n";
       if (!parameters.password) message += "• Password\n";
 
-      const msgWithOptions = formatResponseWithOptions(message, false);
-      await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(message, false));
     }
   } else {
-    const msg = formatResponseWithOptions("You're already logged in. Type 'help' to see available services.", true);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendTypingIndicator(phoneNumber);
+    const bodyText = "🔑 *Already Logged In!* ✨\n\nYou already have an active session.\n\n🚀 Ready to explore?\n✓ Browse medicines\n✓ Book appointments\n✓ Track orders\n✓ Chat support";
+    const buttons = [
+      { id: 'show_help_menu', title: '📋 Main Menu' },
+      { id: 'search_products', title: '💊 Shop Now' }
+    ];
+    await sendInteractiveMessage(phoneNumber, bodyText, buttons);
+    await sendTypingStop(phoneNumber);
   }
 };
 
@@ -1866,16 +2020,15 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
     if (!parameters.product) {
       const pageSize = 5;
       const pageData = await listAllProductsPaginated(1, pageSize);
-      session.data.productPagination = {
-        currentPage: pageData.page,
-        totalPages: pageData.totalPages,
-        pageSize: pageData.pageSize
-      };
-      session.data.productPageItems = pageData.items;
-      session.set('data', session.data);
+      // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+      session.data = { ...session.data, productPagination: { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize }, productPageItems: pageData.items };
       await session.save();
 
-      const msg = buildProductListMessage(pageData.items, pageData.page, pageData.totalPages);
+      console.log(`✅ Saved product list (no search) to session for ${phoneNumber}:`);
+      console.log(`   - productPageItems: ${pageData.items.length} items`);
+      console.log(`   - Session data keys: ${Object.keys(session.data).join(', ')}`);
+
+      const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, '📦 Medicines', (p) => `${p.name}\n   Price: ₦${p.price}`);
       await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
       return;
     }
@@ -1883,8 +2036,7 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
     const products = await searchProducts(parameters.product);
 
     if (products.length === 0) {
-      const msg = formatResponseWithOptions(`Sorry, we couldn't find any products matching "${parameters.product}". Please try a different search term.`, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any products matching "${parameters.product}". Please try a different search term.`, isLoggedIn));
       return;
     }
 
@@ -1903,22 +2055,18 @@ const handleProductSearch = async (phoneNumber, session, parameters) => {
     message += `To add a product to your cart, reply with "add [product number] [quantity]"\nExample: "add 1 2" to add 2 units of the first product.`;
 
     // Save search results and pagination state for Next/Previous support
-    session.data.searchResults = paginatedResults;
-    session.data.productPagination = {
-      currentPage: 1,
-      totalPages: Math.max(1, Math.ceil(products.length / pageSize)),
-      pageSize: pageSize
-    };
-    session.data.productPageItems = paginatedResults;
-    session.set('data', session.data);
+    // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+    session.data = { ...session.data, searchResults: paginatedResults, productPagination: { currentPage: 1, totalPages: Math.max(1, Math.ceil(products.length / pageSize)), pageSize: pageSize }, productPageItems: paginatedResults };
     await session.save();
 
-    const msgWithOptions = formatResponseWithOptions(message, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+    console.log(`✅ Saved product search to session for ${phoneNumber}:`);
+    console.log(`   - productPageItems: ${paginatedResults.length} items`);
+    console.log(`   - searchResults: ${paginatedResults.length} items`);
+    console.log(`   - Session data keys: ${Object.keys(session.data).join(', ')}`);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(message, isLoggedIn));
   } catch (error) {
     console.error('Error searching products:', error);
-    const msg = formatResponseWithOptions("Sorry, we encountered an error while searching for products. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we encountered an error while searching for products. Please try again later.", isAuthenticatedSession(session)));
   }
 };
 
@@ -1930,41 +2078,48 @@ const handleAddToCart = async (phoneNumber, session, parameters) => {
     // Ensure session has latest data and userId
     try {
       await session.reload();
-    } catch (_) {}
+    } catch (reloadError) {
+      console.warn(`⚠️ Session reload failed for ${phoneNumber}:`, reloadError.message);
+    }
+    
     const userIdFromSession = session.data && session.data.userId;
     if (!userIdFromSession) {
-      await sendAuthRequiredMessage(phoneNumber);
+      await sendAuthRequiredMessage(phoneNumber, 'add items to your cart');
       return;
     }
 
     if (!parameters.productIndex || !parameters.quantity) {
-      const msg = formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your list.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Please specify which product and quantity to add. Example: 'add 1 2' to add 2 units of the first product from your list.", isLoggedIn));
       return;
     }
 
     const productIndex = parseInt(parameters.productIndex, 10) - 1;
     const quantity = parseInt(parameters.quantity, 10);
 
+    console.log(`📦 Available product lists in session.data for ${phoneNumber}:`);
+    console.log(`   - searchResults: ${session.data.searchResults ? session.data.searchResults.length : 0} items`);
+    console.log(`   - productPageItems: ${session.data.productPageItems ? session.data.productPageItems.length : 0} items`);
+    console.log(`   - healthcareProductPageItems: ${session.data.healthcareProductPageItems ? session.data.healthcareProductPageItems.length : 0} items`);
+    console.log(`   - Requested product index: ${productIndex + 1} (zero-indexed: ${productIndex})`);
+
     const candidates = (session.data.searchResults || [])
       .concat(session.data.productPageItems || [])
       .concat(session.data.healthcareProductPageItems || []);
 
+    console.log(`   - Total candidates available: ${candidates.length}`);
+
     if (!candidates[productIndex]) {
-      const msg = formatResponseWithOptions("Please list products first (e.g., 'search medicines' or 'browse health products'), then use 'add [number] [qty]'.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Please list products first (e.g., 'search medicines' or 'browse health products'), then use 'add [number] [qty]'.", isLoggedIn));
       return;
     }
 
     const product = candidates[productIndex];
     await addToCart(session.data.userId, product.id, quantity);
 
-    const successMsg = formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout [address] [flutterwave|paystack|cash]' to place your order.`, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, successMsg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Added ${quantity} units of ${product.name} to your cart. Type 'cart' to view your cart or 'checkout [address] [flutterwave|paystack|cash]' to place your order.`, isLoggedIn));
   } catch (error) {
     console.error('Error adding to cart:', error);
-    const msg = formatResponseWithOptions("Sorry, we encountered an error while adding to your cart. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we encountered an error while adding to your cart. Please try again later.", isAuthenticatedSession(session)));
   }
 };
 
@@ -1978,19 +2133,19 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
     } catch (_) {}
     const userIdFromSession = session.data && session.data.userId;
     if (!userIdFromSession) {
-      await sendAuthRequiredMessage(phoneNumber);
+      await sendAuthRequiredMessage(phoneNumber, 'place an order');
       return;
     }
 
-    if (!parameters.address || !parameters.paymentMethod) {
+    // Step 1: Collect Address via Location Sharing if not present
+    if (!parameters.address) {
       let message = "📦 To place your order, send address and payment method:\n";
       message += "Example: 'order 123 Main St, Lagos Flutterwave'\n\n";
       message += "Payment methods:\n";
       message += "• Flutterwave\n";
       message += "• Paystack\n";
       message += "• Cash on Delivery\n";
-      const msgWithOptions = formatResponseWithOptions(message, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(message, isLoggedIn));
       return;
     }
 
@@ -2002,8 +2157,7 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
     // Validate order data
     const { isValidOrderData } = require('./utils/validation');
     if (!isValidOrderData(orderData)) {
-      const msg = formatResponseWithOptions("❌ Invalid delivery address or payment method. Please try again.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Invalid delivery address or payment method. Please try again.", isLoggedIn));
       return;
     }
 
@@ -2016,8 +2170,7 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
       amount: result.totalAmount || 'TBD'
     });
 
-    const successMsg = formatResponseWithOptions(`✅ Your order has been placed successfully!\n\nOrder ID: #${result.orderId}`, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, successMsg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`✅ Your order has been placed successfully!\n\nOrder ID: #${result.orderId}`, isLoggedIn));
 
     // Generate payment link if online payment is selected
     const validPaymentMethods = ['Flutterwave', 'Paystack'];
@@ -2069,25 +2222,6 @@ const handlePlaceOrder = async (phoneNumber, session, parameters) => {
   }
 };
 
-const buildProductListMessage = (items, page, totalPages) => {
-  let message = `📦 Medicines (Page ${page}/${totalPages})\n\n`;
-  items.forEach((product, index) => {
-    message += `${index + 1}. ${product.name}\n`;
-    if (product.price) message += `   Price: ₦${product.price}\n`;
-    if (product.category) message += `   Category: ${product.category}\n`;
-    if (product.imageUrl) message += `   Image: ${product.imageUrl}\n`;
-    message += `\n`;
-  });
-
-  message += `📍 *Navigation:*\n`;
-  if (page > 1) message += `• Type "Previous" to go to page ${page - 1}\n`;
-  if (page < totalPages) message += `• Type "Next" to go to page ${page + 1}\n`;
-  message += `• Type a product number (1-${items.length}) to select a product\n`;
-  message += `• Type "add [number] [quantity]" to add to cart (e.g., "add 1 2")`;
-
-  return message;
-};
-
 // Handle view cart
 const { getCartPaginated } = require('./services/orderManagement');
 
@@ -2096,10 +2230,9 @@ const handleViewCart = async (phoneNumber, session, parameters) => {
     const isLoggedIn = isAuthenticatedSession(session);
     try { await session.reload(); } catch (_) {}
     const userId = session.data && session.data.userId;
-    if (!userId) { await sendAuthRequiredMessage(phoneNumber); return; }
+    if (!userId) { await sendAuthRequiredMessage(phoneNumber, 'view your cart'); return; }
 
-    const pageSize = 5;
-    const result = await getCartPaginated(userId, { page: 1, pageSize });
+    const result = await getCartPaginated(userId, { page: 1, pageSize: 5 });
     if (!result.success) {
       await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions('Sorry, could not fetch your cart right now.', isLoggedIn));
       return;
@@ -2109,8 +2242,8 @@ const handleViewCart = async (phoneNumber, session, parameters) => {
       return;
     }
 
-    session.data.cartPagination = { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize };
-    session.set('data', session.data);
+    // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+    session.data = { ...session.data, cartPagination: { currentPage: result.pagination.currentPage, totalPages: result.pagination.totalPages, pageSize: result.pagination.pageSize } };
     await session.save();
 
     let msg = `🧺 Cart (Page ${result.pagination.currentPage}/${result.pagination.totalPages})\n\n`;
@@ -2120,7 +2253,6 @@ const handleViewCart = async (phoneNumber, session, parameters) => {
     msg += `\nTotal: ₦${(result.cartTotal).toLocaleString()}\n`;
     msg += `\n📍 *Navigation:*${result.pagination.currentPage > 1 ? `\n• Type "Previous" to go to page ${result.pagination.currentPage - 1}` : ''}${result.pagination.currentPage < result.pagination.totalPages ? `\n• Type "Next" to go to page ${result.pagination.currentPage + 1}` : ''}`;
     msg += `\n• To checkout: type "checkout [address] [flutterwave|paystack|cash]"`;
-
     await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
   } catch (error) {
     console.error('Error viewing cart:', error);
@@ -2134,8 +2266,7 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
     const isLoggedIn = isAuthenticatedSession(session);
 
     if (!parameters.orderId) {
-      const msg = formatResponseWithOptions("📍 To track your order, provide the order ID.\n\nExample: 'track 12345'", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("📍 To track your order, provide the order ID.\n\nExample: 'track 12345'", isLoggedIn));
       return;
     }
 
@@ -2145,23 +2276,21 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
     const orderId = sanitizeInput(parsed);
 
     if (!isValidOrderId(orderId)) {
-      const msg = formatResponseWithOptions("❌ The order ID you provided doesn't look valid. Please provide a numeric Order ID (e.g., 12345) or a reference like 'drugsng-12345-...'.\n\nExample: track 12345", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ The order ID you provided doesn't look valid. Please provide a numeric Order ID (e.g., 12345) or a reference like 'drugsng-12345-...'.\n\nExample: track 12345", isLoggedIn));
       return;
     }
 
     const orderDetails = await trackOrder(orderId);
 
     if (!orderDetails) {
-      const msg = formatResponseWithOptions(`❌ Order #${orderId} not found. Please verify the order ID.`, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ Order #${orderId} not found. Please verify the order ID.`, isLoggedIn));
       return;
     }
 
     const statusEmoji = {
       'Processing': '⏳',
       'Shipped': '🚚',
-      'Delivered': '���',
+      'Delivered': '✅',
       'Cancelled': '❌'
     };
 
@@ -2183,13 +2312,11 @@ const handleTrackOrder = async (phoneNumber, session, parameters) => {
     message += `\n*Delivery Address:*\n${orderDetails.shippingAddress || 'Not provided'}\n\n`;
     message += `Need help? Type 'support' to chat with our team.`;
 
-    const msgWithOptions = formatResponseWithOptions(message, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(message, isLoggedIn));
   } catch (error) {
     console.error('Error tracking order:', error);
     const errorMessage = handleApiError(error, 'track_order').message;
-    const msg = formatResponseWithOptions(`❌ ${errorMessage}`, isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ ${errorMessage}`, isAuthenticatedSession(session)));
   }
 };
 
@@ -2211,9 +2338,8 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
       const page = 1;
       const totalPages = Math.max(1, Math.ceil(DOCTOR_SPECIALTIES.length / pageSize));
       const items = DOCTOR_SPECIALTIES.slice(0, pageSize).map((s) => ({ name: s }));
-      session.data.doctorSpecialtyPagination = { currentPage: page, totalPages, pageSize };
-      session.data.doctorSpecialtyPageItems = items;
-      session.set('data', session.data);
+      // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+      session.data = { ...session.data, doctorSpecialtyPagination: { currentPage: page, totalPages, pageSize }, doctorSpecialtyPageItems: items };
       await session.save();
 
       const msg = buildPaginatedListMessage(items, page, totalPages, '🗂️ Doctor Specialties', (it) => it.name);
@@ -2226,17 +2352,19 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
     const pageData = await searchDoctorsPaginated(parameters.specialty, location, 1, pageSize);
 
     if (!pageData.items || pageData.items.length === 0) {
-      const msg = formatResponseWithOptions(`Sorry, we couldn't find any ${parameters.specialty} in ${location}. Please try a different specialty or location.`, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Sorry, we couldn't find any ${parameters.specialty} in ${location}. Please try a different specialty or location.`, isLoggedIn));
       return;
     }
 
     // Save pagination and last search
-    session.data.doctorPagination = { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize };
-    session.data.doctorPageItems = pageData.items;
-    session.data.doctorSearchResults = pageData.items;
-    session.data.lastDoctorSearch = { specialty: parameters.specialty, location };
-    session.set('data', session.data);
+    // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+    session.data = { 
+      ...session.data, 
+      doctorPagination: { currentPage: pageData.page, totalPages: pageData.totalPages, pageSize: pageData.pageSize },
+      doctorPageItems: pageData.items,
+      doctorSearchResults: pageData.items,
+      lastDoctorSearch: { specialty: parameters.specialty, location }
+    };
     await session.save();
 
     const msg = buildPaginatedListMessage(pageData.items, pageData.page, pageData.totalPages, `Here are some ${parameters.specialty} doctors in ${location}:`, (doctor) => {
@@ -2247,15 +2375,12 @@ const handleDoctorSearch = async (phoneNumber, session, parameters) => {
       return s;
     });
 
-    const msgWithOptions = formatResponseWithOptions(msg, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, msgWithOptions);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
   } catch (error) {
     console.error('Error searching doctors:', error);
-    const msg = formatResponseWithOptions("Sorry, we encountered an error while searching for doctors. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we encountered an error while searching for doctors. Please try again later.", isAuthenticatedSession(session)));
   }
 };
-
 // Handle book appointment
 const handleBookAppointment = async (phoneNumber, session, parameters) => {
   try {
@@ -2266,13 +2391,12 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
     } catch (_) {}
     const userIdFromSession = session.data && session.data.userId;
     if (!userIdFromSession) {
-      await sendAuthRequiredMessage(phoneNumber);
+      await sendAuthRequiredMessage(phoneNumber, 'book an appointment');
       return;
     }
 
     if (!parameters.doctorIndex || !parameters.date || !parameters.time) {
-      const msg = formatResponseWithOptions("Please specify which doctor, date, and time for your appointment. Example: 'book 1 2023-06-15 14:00' to book the first doctor on June 15th at 2 PM.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Please specify which doctor, date, and time for your appointment. Example: 'book 1 2023-06-15 14:00' to book the first doctor on June 15th at 2 PM.", isLoggedIn));
       return;
     }
 
@@ -2281,11 +2405,9 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
 
     const doctorList = (session.data.doctorPageItems || session.data.doctorSearchResults || []);
     if (!doctorList[doctorIndex]) {
-      const msg = formatResponseWithOptions("Please search for doctors first before booking an appointment.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Please search for doctors first before booking an appointment.", isLoggedIn));
       return;
     }
-
     const doctor = doctorList[doctorIndex];
     const result = await bookAppointment(session.data.userId, doctor.id, dateTime);
 
@@ -2295,15 +2417,12 @@ const handleBookAppointment = async (phoneNumber, session, parameters) => {
       dateTime: dateTime.toISOString()
     });
 
-    const successMsg = formatResponseWithOptions(`Your appointment with Dr. ${doctor.name} has been scheduled for ${dateTime.toLocaleString()}. Appointment ID: ${result.appointmentId}. You will receive a confirmation shortly.`, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, successMsg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`Your appointment with Dr. ${doctor.name} has been scheduled for ${dateTime.toLocaleString()}. Appointment ID: ${result.appointmentId}. You will receive a confirmation shortly.`, isLoggedIn));
   } catch (error) {
     console.error('Error booking appointment:', error);
-    const msg = formatResponseWithOptions("Sorry, we encountered an error while booking your appointment. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we encountered an error while booking your appointment. Please try again later.", isAuthenticatedSession(session)));
   }
 };
-
 // Handle payment
 const handlePayment = async (phoneNumber, session, parameters) => {
   try {
@@ -2314,13 +2433,12 @@ const handlePayment = async (phoneNumber, session, parameters) => {
     } catch (_) {}
     const userIdFromSession = session.data && session.data.userId;
     if (!userIdFromSession) {
-      await sendAuthRequiredMessage(phoneNumber);
+      await sendAuthRequiredMessage(phoneNumber, 'make a payment');
       return;
     }
 
     if (!parameters.orderId || !parameters.provider) {
-      const msg = formatResponseWithOptions("Please provide your order ID and payment provider. Example: 'pay 12345 flutterwave'", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Please provide your order ID and payment provider. Example: 'pay 12345 flutterwave'", isLoggedIn));
       return;
     }
 
@@ -2340,8 +2458,7 @@ const handlePayment = async (phoneNumber, session, parameters) => {
       const user = await sequelize.models.User.findByPk(session.data.userId);
       paymentDetails.email = user.email;
     } catch (error) {
-      const msg = formatResponseWithOptions("Sorry, we couldn't find that order. Please check the order ID and try again.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we couldn't find that order. Please check the order ID and try again.", isLoggedIn));
       return;
     }
 
@@ -2354,33 +2471,50 @@ const handlePayment = async (phoneNumber, session, parameters) => {
       const paymentMsg = formatResponseWithOptions(`Please complete your payment using this link: ${result.data.authorization_url}`, isLoggedIn);
       await sendWhatsAppMessage(phoneNumber, paymentMsg);
     } else {
-      const msg = formatResponseWithOptions("Sorry, we only support Flutterwave and Paystack for online payments.", isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we only support Flutterwave and Paystack for online payments.", isLoggedIn));
     }
   } catch (error) {
     console.error('Error processing payment:', error);
-    const msg = formatResponseWithOptions("Sorry, we encountered an error while processing your payment. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Sorry, we encountered an error while processing your payment. Please try again later.", isAuthenticatedSession(session)));
   }
 };
-
 // Handle help
 const handleHelp = async (phoneNumber, isLoggedIn) => {
-  const helpMessage = `🏥 *Drugs.ng WhatsApp Bot - Available Services:*
+  await sendTypingIndicator(phoneNumber);
+  const bodyText = `🏥 *Drugs.ng - Your Health Hub* 💊\n\n👋 Welcome back! I'm *Drugo*, your AI health assistant.\n\n✨ *You can:*\n🗣️ Type your request naturally\n🎤 Record a voice note\n📋 Browse the menu below\n\n🚀 *I'm here to help with:*\n💊 Medicines & products\n👨‍⚕️ Doctor consultations\n🔬 Lab tests\n📦 Order tracking\n💬 Support\n\n*What can I help you with today?*`;
+  const buttonText = "View Menu";
+  
+  const accountRows = [
+    { id: "support", title: "💬 Contact Support", description: "Chat with a human agent" }
+  ];
 
-1️⃣ *Search Medicines* - Type "1" or "Find paracetamol"
-2️⃣ *Find Doctors* - Type "2" or "Find a cardiologist"
-3️⃣ *Track Orders* - Type "3" or "Track 12345"
-4️⃣ *Book Appointment* - Type "4" or "Book a doctor"
-5️⃣ *View Cart* - Type "5" or "cart"
-6️⃣ *Customer Support* - Type "6" or "Connect me to support"
-7️⃣ *Upload Prescription* (image or PDF) - Send your file. To auto-attach, add a caption with your Order ID, e.g.: rx 12345 (also accepts "order 12345" or "prescription 12345"). Find your Order ID in your order confirmation message. If unsure, type "support" and we’ll help link it.
-8️⃣ *Browse Healthcare Products* - Type "8" or "browse health products"
+  if (isLoggedIn) {
+    accountRows.push({ id: "logout", title: "🔒 Logout", description: "End your current session" });
+  }
+  
+  const sections = [
+    {
+      title: "Shop & Orders",
+      rows: [
+        { id: "search_products", title: "💊 Search Medicines", description: "Find and buy medicines" },
+        { id: "healthcare_products", title: "🛒 Browse Health Products", description: "Shop for devices, supplements, etc." },
+        { id: "view_cart", title: "🛒 View Cart", description: "Check items in your cart" },
+        { id: "track_order", title: "📍 Track My Order", description: "Get the status of your delivery" },
+        { id: "prescription_upload", title: "📄 Upload Prescription", description: "Send a prescription file" }
+      ]
+    },
+    {
+      title: "Health Services",
+      rows: [
+        { id: "search_doctors", title: "👨‍⚕️ Find a Doctor", description: "Search for a specialist" },
+        { id: "book_appointment", title: "📅 Book Appointment", description: "Schedule a consultation" },
+        { id: "diagnostic_tests", title: "🔬 Book a Lab Test", description: "Schedule a diagnostic test" }
+      ]
+    },
+    { title: "Account & Support", rows: accountRows }
+  ];
 
-Simply reply with a number (1-8) or describe what you need!`;
-
-  const messageWithOptions = formatResponseWithOptions(helpMessage, isLoggedIn);
-  await sendWhatsAppMessage(phoneNumber, messageWithOptions);
+  await sendListMessage(phoneNumber, bodyText, buttonText, sections);
 };
 
 // Handle support request
@@ -2390,8 +2524,7 @@ const handleSupportRequest = async (phoneNumber, session, parameters) => {
     const supportRole = parameters.supportType || 'general';
     await startSupportChat(phoneNumber, supportRole);
 
-    const msg = formatResponseWithOptions(`You've been connected to our ${supportRole} support team. Please describe your issue and a support agent will assist you shortly.`, isLoggedIn);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`You've been connected to our ${supportRole} support team. Please describe your issue and a support agent will assist you shortly.`, isLoggedIn));
   } catch (error) {
     console.error('Error starting support chat:', error);
     // Revert session state on failure
@@ -2399,9 +2532,8 @@ const handleSupportRequest = async (phoneNumber, session, parameters) => {
       session.state = 'LOGGED_IN';
       session.supportTeamId = null;
       await session.save();
-    } catch (_) {}
-    const msg = formatResponseWithOptions("Support is currently unavailable. You are back with the bot. Type 'help' for menu.", isAuthenticatedSession(session));
-    try { await sendWhatsAppMessage(phoneNumber, msg); } catch (_) {}
+    } catch (_) { }
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("Support is currently unavailable. You are back with the bot. Type 'help' for menu.", isAuthenticatedSession(session)));
   }
 };
 
@@ -2416,8 +2548,7 @@ const handleResendOTP = async (phoneNumber, session) => {
     let registrationData = (freshSession && freshSession.data && freshSession.data.registrationData) || (session.data && session.data.registrationData);
 
     if (!registrationData || !registrationData.email) {
-      const msg = formatResponseWithOptions("❌ No active registration found. Please start over by typing 'register'.", false);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ No active registration found. Please start over by typing 'register'.", false));
       if (freshSession) {
         freshSession.data.waitingForOTPVerification = false;
         freshSession.data.registrationData = null;
@@ -2471,8 +2602,7 @@ const handleResendOTP = async (phoneNumber, session) => {
     // Try to send the new OTP via email
     try {
       await sendOTPEmail(registrationData.email, newOtp, registrationData.name);
-      const msg = formatResponseWithOptions(`✅ A new OTP has been sent to ${registrationData.email}. Please reply with the 4-digit code. It's valid for 5 minutes.`, false);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`✅ A new OTP has been sent to ${registrationData.email}. Please reply with the 4-digit code. It's valid for 5 minutes.`, false));
 
       // Reset attempt counter and mark as waiting for OTP
       session.data.waitingForOTPVerification = true;
@@ -2481,7 +2611,7 @@ const handleResendOTP = async (phoneNumber, session) => {
       await session.save();
     } catch (emailError) {
       console.error('Error sending resend OTP email:', emailError);
-      const fallbackMsg = formatResponseWithOptions(`⚠️ **Email service temporarily unavailable.**\n\n✅ **You can still continue:**\n1️��� A new OTP code has been generated and saved\n2️⃣ Contact our support team to get your backup OTP code\n3️⃣ Reply with your 4-digit code when you have it\n\nNeed help? Type 'support' to reach our team.`, false);
+      const fallbackMsg = `⚠️ **Email service temporarily unavailable.**\n\n✅ **You can still continue:**\n1️ A new OTP code has been generated and saved\n2️⃣ Contact our support team to get your backup OTP code\n3️⃣ Reply with your 4-digit code when you have it\n\nNeed help? Type 'support' to reach our team.`;
       await sendWhatsAppMessage(phoneNumber, fallbackMsg);
 
       session.data.waitingForOTPVerification = true;
@@ -2490,8 +2620,7 @@ const handleResendOTP = async (phoneNumber, session) => {
     }
   } catch (error) {
     console.error('Error resending OTP:', error);
-    const msg = formatResponseWithOptions("❌ Error resending OTP. Please try again or type 'support' for help.", false);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Error resending OTP. Please try again or type 'support' for help.", false));
   }
 };
 
@@ -2503,8 +2632,7 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
 
     // Verify OTP format - must be exactly 4 digits
   if (!/^\d{4}$/.test(otp)) {
-    const msg = formatResponseWithOptions("❌ Invalid OTP format. Please enter exactly 4 digits.", false);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Invalid OTP format. Please enter exactly 4 digits.", false));
     return;
   }
 
@@ -2547,8 +2675,7 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
 
   // If still missing registration data, we can't proceed safely
   if (!registrationData || !registrationData.email) {
-    const msg = formatResponseWithOptions("❌ Registration session expired. Please start again by typing 'register'.", false);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Registration session expired. Please start again by typing 'register'.", false));
     if (freshSession) {
       freshSession.data.waitingForOTPVerification = false;
       freshSession.data.registrationData = null;
@@ -2577,22 +2704,19 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
   }
 
     if (!otpRecord) {
-      const msg = formatResponseWithOptions("❌ Invalid OTP. The code you entered doesn't match our records.\n\n💡 **What to do:**\n1️⃣ Double-check the 4-digit code from your email\n2️⃣ Type 'resend' if you need a new OTP code\n3️⃣ Contact support if you need a backup OTP\n\nNeed help? Type 'support' to reach our team.", false);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Invalid OTP. The code you entered doesn't match our records.\n\n💡 **What to do:**\n1️⃣ Double-check the 4-digit code from your email\n2️⃣ Type 'resend' if you need a new OTP code\n3️⃣ Contact support if you need a backup OTP\n\nNeed help? Type 'support' to reach our team.", false));
       return;
     }
 
     // Check if OTP is already used
     if (otpRecord.isUsed) {
-      const msg = formatResponseWithOptions("❌ This OTP has already been used. Please type 'resend' to get a new OTP code.", false);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ This OTP has already been used. Please type 'resend' to get a new OTP code.", false));
       return;
     }
 
     // Check if OTP is expired
     if (new Date() > otpRecord.expiresAt) {
-      const msg = formatResponseWithOptions("❌ OTP has expired (valid for only 5 minutes).\n\n💡 **What to do:**\nType 'resend' to receive a fresh OTP code.\n\nNeed help? Type 'support' to reach our team.", false);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ OTP has expired (valid for only 5 minutes).\n\n💡 **What to do:**\nType 'resend' to receive a fresh OTP code.\n\nNeed help? Type 'support' to reach our team.", false));
       return;
     }
 
@@ -2605,17 +2729,34 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
     try {
       const result = await registerUser(registrationData);
 
+      // Generate registration token
+      const registrationToken = result.token || generateToken();
+
       // ONLY NOW update session with user data (after successful registration)
       session.state = 'LOGGED_IN';
+      session.token = registrationToken;  // Store in dedicated column
+      session.userId = result.userId;
+      session.loginTime = new Date();
+      session.lastActivity = new Date();
+      session._lastActivityExplicitlySet = true;
       session.data = Object.assign(session.data || {}, {
         userId: result.userId,
-        token: result.token || generateToken(),
+        token: registrationToken,  // Also in data for compatibility
         tokenLastUsed: new Date().toISOString(),
         waitingForOTPVerification: false,
         registrationData: null,
         emailSendFailed: false
       });
-      session.set('data', session.data);
+      
+      // Mark all fields as changed for Sequelize
+      session.changed('token', true);
+      session.changed('userId', true);
+      session.changed('loginTime', true);
+      session.changed('lastActivity', true);
+      session.changed('state', true);
+      session.changed('data', true);
+      
+      console.log(`📝 Registration complete, saving token: ${registrationToken.substring(0, 10)}...`);
       await session.save();
 
       // Notify support teams
@@ -2624,13 +2765,11 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
         email: registrationData.email
       });
 
-      const successMsg = formatResponseWithOptions(`✅ Registration successful! Welcome to Drugs.ng, ${registrationData.name}. You can now access all our services. Type 'help' to get started!`, true);
-      await sendWhatsAppMessage(phoneNumber, successMsg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`✅ Registration successful! Welcome to Drugs.ng, ${registrationData.name}. You can now access all our services. Type 'help' to get started!`, true));
     } catch (error) {
       console.error('Registration completion error:', error);
       const errorMessage = handleApiError(error, 'registration').message;
-      const errorMsg = formatResponseWithOptions(`❌ Registration failed: ${errorMessage}. Please try again or type 'resend' to get a new OTP.`, false);
-      await sendWhatsAppMessage(phoneNumber, errorMsg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ Registration failed: ${errorMessage}. Please try again or type 'resend' to get a new OTP.`, false));
 
       // Reset OTP used flag since registration failed, but keep session in REGISTERING state
       otpRecord.isUsed = false;
@@ -2642,8 +2781,7 @@ const handleRegistrationOTPVerification = async (phoneNumber, session, otpCode) 
     }
   } catch (error) {
     console.error('Error verifying OTP:', error);
-    const msg = formatResponseWithOptions("❌ Error verifying OTP. Please try again or type 'support' for help.", false);
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Error verifying OTP. Please try again or type 'support' for help.", false));
   }
 };
 
@@ -2668,16 +2806,18 @@ const handleDiagnosticTestSearch = async (phoneNumber, session, parameters) => {
     const { rows, count } = await DiagnosticTest.findAndCountAll({ where, limit: pageSize, offset, order: [['id','ASC']] });
 
     if (!rows || rows.length === 0) {
-      const msg = formatResponseWithOptions(`❌ No diagnostic tests found${parameters.testType ? ` for "${parameters.testType}"` : ''}. Please try a different search or type 'help' for more options.`, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ No diagnostic tests found${parameters.testType ? ` for "${parameters.testType}"` : ''}. Please try a different search or type 'help' for more options.`, isLoggedIn));
       return;
     }
 
     const totalPages = Math.max(1, Math.ceil(count / pageSize));
-    session.data.diagnosticTestPagination = { currentPage: page, totalPages, pageSize };
-    session.data.diagnosticTestPageItems = rows;
-    session.data.lastDiagnosticSearch = { testType: parameters.testType || null };
-    session.set('data', session.data);
+    // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+    session.data = { 
+      ...session.data, 
+      diagnosticTestPagination: { currentPage: page, totalPages, pageSize },
+      diagnosticTestPageItems: rows,
+      lastDiagnosticSearch: { testType: parameters.testType || null }
+    };
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🔬 Diagnostic Tests', (test) => {
@@ -2687,12 +2827,10 @@ const handleDiagnosticTestSearch = async (phoneNumber, session, parameters) => {
       if (test.description) s += `\n   ${test.description}`;
       return s;
     });
-
     await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
   } catch (error) {
     console.error('Error searching diagnostic tests:', error);
-    const msg = formatResponseWithOptions("❌ Error retrieving diagnostic tests. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Error retrieving diagnostic tests. Please try again later.", isAuthenticatedSession(session)));
   }
 };
 
@@ -2717,16 +2855,18 @@ const handleHealthcareProductBrowse = async (phoneNumber, session, parameters) =
     const { rows, count } = await HealthcareProduct.findAndCountAll({ where, limit: pageSize, offset, order: [['id','ASC']] });
 
     if (!rows || rows.length === 0) {
-      const msg = formatResponseWithOptions(`❌ No healthcare products found${parameters.category ? ` in "${parameters.category}"` : ''}. Please try a different search or type 'help' for more options.`, isLoggedIn);
-      await sendWhatsAppMessage(phoneNumber, msg);
+      await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(`❌ No healthcare products found${parameters.category ? ` in "${parameters.category}"` : ''}. Please try a different search or type 'help' for more options.`, isLoggedIn));
       return;
     }
 
     const totalPages = Math.max(1, Math.ceil(count / pageSize));
-    session.data.healthcareProductPagination = { currentPage: page, totalPages, pageSize };
-    session.data.healthcareProductPageItems = rows;
-    session.data.lastHealthcareProductSearch = { category: parameters.category || null };
-    session.set('data', session.data);
+    // 🔴 CRITICAL: Use spread operator to ensure Sequelize detects JSONB field change
+    session.data = { 
+      ...session.data, 
+      healthcareProductPagination: { currentPage: page, totalPages, pageSize },
+      healthcareProductPageItems: rows,
+      lastHealthcareProductSearch: { category: parameters.category || null }
+    };
     await session.save();
 
     const msg = buildPaginatedListMessage(rows, page, totalPages, '🛒 Healthcare Products', (product) => {
@@ -2737,13 +2877,208 @@ const handleHealthcareProductBrowse = async (phoneNumber, session, parameters) =
       if (product.usage) s += `\n   Usage: ${product.usage}`;
       return s;
     });
-
     await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions(msg, isLoggedIn));
   } catch (error) {
     console.error('Error browsing healthcare products:', error);
-    const msg = formatResponseWithOptions("❌ Error retrieving healthcare products. Please try again later.", isAuthenticatedSession(session));
-    await sendWhatsAppMessage(phoneNumber, msg);
+    await sendWhatsAppMessage(phoneNumber, formatResponseWithOptions("❌ Error retrieving healthcare products. Please try again later.", isAuthenticatedSession(session)));
   }
+};
+/**
+ * NEW: Handles incoming text messages using the new modular flow.
+ */
+const handleTextMessage = async (messageText, phoneNumber, messageId) => {
+  // This function now acts as the primary entry point for text, replacing the old `handleCustomerMessage`.
+  // It will call the same logic, but structured in a more modern way.
+  const supportTeam = await sequelize.models.SupportTeam.findOne({ where: { phoneNumber } });
+  if (supportTeam) {
+    console.log(`👨‍💼 Support team message from ${phoneNumber}`);
+    await handleSupportTeamMessage(phoneNumber, messageText);
+  } else {
+    console.log(`👤 Customer message from ${phoneNumber}`);
+    await handleCustomerMessage(phoneNumber, messageText, messageId);
+  }
+};
+
+/**
+ * NEW: Handles incoming voice messages.
+ */
+const handleVoiceMessage = async (voiceMessageObject, phoneNumber, messageId) => {
+  try {
+    console.log(`[VOICE] Processing voice from ${phoneNumber}`);
+    const transcriptionResult = await voiceProcessor.processWhatsAppVoiceMessage(voiceMessageObject, phoneNumber);
+
+    if (!transcriptionResult.success) {
+      console.error('[VOICE ERROR]', transcriptionResult.error);
+      await sendWhatsAppMessage(phoneNumber, `Sorry, I couldn't understand the voice message. Error: ${transcriptionResult.error}. Please try typing instead.`);
+      return;
+    }
+
+    const transcribedText = transcriptionResult.text;
+    console.log(`[TRANSCRIBED] "${transcribedText}"`);
+
+    const confirmText = `📝 I understood: "${transcribedText}"\n\nProcessing your request...`;
+    await sendWhatsAppMessage(phoneNumber, confirmText);
+
+    // Process the transcribed text through the same flow as a regular text message
+    await handleTextMessage(transcribedText, phoneNumber, messageId);
+
+  } catch (error) {
+    console.error('[VOICE PROCESSING ERROR]', error);
+    await sendWhatsAppMessage(phoneNumber, 'Sorry, an error occurred while processing your voice message. Please try typing.');
+  }
+};
+
+/**
+ * NEW: Handles incoming media (image/document) for prescriptions.
+ */
+const handleMediaMessage = async (message, phoneNumber, messageId) => {
+  // Provide immediate feedback to the user
+  await sendWhatsAppMessage(phoneNumber, 'Processing your file, please wait... ⏳');
+
+  try {
+    let mediaId, mimeType, filename, caption = '';
+
+    if (message.type === 'image') {
+      mediaId = message.image.id;
+      mimeType = message.image.mime_type || 'image/jpeg';
+      caption = message.image.caption || '';
+      filename = `prescription-${Date.now()}`;
+    } else { // document
+      mediaId = message.document.id;
+      mimeType = message.document.mime_type || 'application/pdf';
+      filename = message.document.filename || `prescription-${Date.now()}.pdf`;
+      caption = message.document.caption || message.caption || '';
+    }
+
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!allowed.includes(mimeType)) {
+      await sendWhatsAppMessage(phoneNumber, 'Unsupported file type. Please send an image (JPG, PNG, WEBP) or a PDF.');
+      return;
+    }
+
+    const { buffer } = await downloadMedia(mediaId);
+    const uploadResult = await uploadImage(buffer, { folder: 'drugs-ng/prescriptions', filename, resourceType: 'auto' });
+    const ocr = await extractPrescriptionFromBuffer(buffer).catch(err => console.warn('OCR failed:', err.message));
+    const extractedText = ocr?.extractedText || null;
+
+    const match = caption.match(/(?:rx|order|prescription)\s*#?(\d+)/i);
+    if (match && match[1]) {
+      const orderId = match[1];
+      try {
+        const result = await savePrescription(orderId, uploadResult.url, extractedText);
+        await sendWhatsAppMessage(phoneNumber, `✅ Prescription received and attached to order #${orderId}. Status: ${result.verificationStatus || 'Pending'}.`);
+      } catch (err) {
+        console.error(`Error attaching prescription to order #${orderId}:`, err);
+        await sendWhatsAppMessage(phoneNumber, `❌ We received your prescription, but couldn't attach it to order #${orderId}. Please ensure the order ID is correct. You can try again by replying: \`rx ${orderId}\``);
+      }
+    } else {
+      const [session] = await Session.findOrCreate({ where: { phoneNumber }, defaults: { state: 'NEW', data: {} } });
+      session.set('data', {
+        ...session.data,
+        pendingPrescriptionUrl: uploadResult.url,
+        ...(extractedText && { pendingPrescriptionExtractedText: extractedText })
+      });
+      await session.save();
+      await sendWhatsAppMessage(phoneNumber, '📄 Prescription received.\n\nTo attach it to an order, reply now with your Order ID (e.g., `rx 12345`).');
+    }
+  } catch (err) {
+    console.error('Media handling error:', err);
+    let userMessage = 'Sorry, there was a problem processing your file. Please try again.';
+    if (err.message && err.message.includes('Timeout')) {
+      userMessage = 'The file upload timed out. Please check your connection and try again with a smaller file if possible.';
+    }
+    await sendWhatsAppMessage(phoneNumber, userMessage);
+  }
+};
+
+/**
+ * NEW: Handles incoming location messages for delivery address.
+ */
+const handleLocationMessage = async (message, phoneNumber, messageId) => {
+    const { latitude, longitude, name, address } = message.location;
+    console.log(`[LOCATION] Received from ${phoneNumber}: Lat=${latitude}, Lon=${longitude}`);
+
+    const session = await Session.findOne({ where: { phoneNumber } });
+    if (session && session.data.isSettingAddress) {
+        const fullAddress = [name, address].filter(Boolean).join(', ');
+        session.set('data', { ...session.data, deliveryAddress: { latitude, longitude, description: fullAddress }, isSettingAddress: false });
+        await session.save();
+        await sendWhatsAppMessage(phoneNumber, `✅ Delivery address set to: ${fullAddress}\n\nYou can now proceed to checkout.`);
+    } else {
+        await sendWhatsAppMessage(phoneNumber, `Thanks for sharing your location!`);
+    }
+};
+
+const handleInteractiveMessage = async (message, phoneNumber, messageId) => {
+  const interactive = message.interactive;
+  let replyId;
+
+  if (interactive.type === 'button_reply') {
+    replyId = interactive.button_reply.id;
+  } else if (interactive.type === 'list_reply') {
+    replyId = interactive.list_reply.id;
+  } else {
+    console.warn(`Unknown interactive type: ${interactive.type}`);
+    return;
+  }
+
+  console.log(`[INTERACTIVE] User clicked button/list with ID: "${replyId}"`);
+
+  // --- PAGINATION CONTEXT CLEARING ---
+  // If user selects a top-level menu item, clear any existing pagination context
+  // to prevent them from getting "stuck".
+  const topLevelMenuActions = ['search_products', 'healthcare_products', 'view_cart', 'track_order', 'search_doctors', 'book_appointment', 'diagnostic_tests', 'support'];
+  if (topLevelMenuActions.includes(replyId)) {
+    const sessionForClear = await Session.findOne({ where: { phoneNumber } });
+    if (sessionForClear && sessionForClear.data) {
+      delete sessionForClear.data.doctorSpecialtyPagination;
+      delete sessionForClear.data.doctorPagination;
+      delete sessionForClear.data.productPagination;
+      delete sessionForClear.data.cartPagination;
+      sessionForClear.changed('data', true);
+      await sessionForClear.save();
+      console.log(`[CONTEXT_CLEAR] Cleared pagination context for user selecting a new menu item.`);
+    }
+  }
+  // Route the reply ID to the appropriate action
+  // This is like a mini-router for button clicks.
+  switch (replyId) {
+    case 'show_help_menu':
+      const sessionForHelp = await Session.findOne({ where: { phoneNumber } });
+      await handleHelp(phoneNumber, isAuthenticatedSession(sessionForHelp));
+      break;
+    case 'show_login_prompt':
+      const loginBody = "🔐 To login, please send your credentials in one message.\n\nExample: `login john@example.com mypassword`";
+      const loginButtons = [
+        { id: 'show_password_reset_prompt', title: '🤔 Forgot Password?' }
+      ];
+      await sendInteractiveMessage(phoneNumber, loginBody, loginButtons);
+      break;
+    case 'show_register_prompt':
+      await sendWhatsAppMessage(phoneNumber, "📝 To get started, please provide your details in one message.\n\nExample: `register John Doe john@example.com MyPassword123`");
+      break;
+    case 'logout': // from help menu
+    case 'logout_session': // from button
+        const sessionForLogout = await Session.findOne({ where: { phoneNumber } });
+        if (sessionForLogout) {
+            await handleLogout(phoneNumber, sessionForLogout);
+        } else {
+            await sendWhatsAppMessage(phoneNumber, "You are not logged in.");
+        }
+      break;
+    case 'show_password_reset_prompt':
+      await sendWhatsAppMessage(phoneNumber, "🔑 To reset your password, please type `reset my password for [your-email]`.\n\nExample: `reset my password for john@example.com`");
+      break;
+    default:
+      // For list replies that map directly to commands like 'search_products'
+      await handleCustomerMessage(phoneNumber, replyId, messageId);
+      break;
+  }
+};
+
+const getStandardButtons = (isLoggedIn) => {
+  if (isLoggedIn) return [{ id: 'show_help_menu', title: '📋 View Menu' }, { id: 'logout_session', title: '🔒 Logout' }];
+  return [{ id: 'show_login_prompt', title: '🔒 Login' }, { id: 'show_register_prompt', title: '📝 Register' }, { id: 'show_help_menu', title: '📋 Main Menu' }];
 };
 
 // Start the server

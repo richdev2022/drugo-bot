@@ -106,11 +106,42 @@ const processMessage = async (message, phoneNumber, session) => {
 
     const lowerMessage = message.toLowerCase().trim();
 
-    // Check for numeric command first (e.g., "1", "2", etc.)
+    // 🔴 CRITICAL: Check if user is in ANY pagination context FIRST
+    // This prevents ANY intent processing while user is selecting from a paginated list
+    const isInPaginationContext = session && session.data && (
+      !!session.data.doctorSpecialtyPagination ||
+      !!session.data.doctorPagination ||
+      !!session.data.productPagination ||
+      !!session.data.cartPagination
+    );
+
+    // If numeric input in pagination context, let webhook pagination handlers manage it
     if (/^\d+$/.test(lowerMessage)) {
+      if (isInPaginationContext) {
+        console.log(`⚠️  NLP: Numeric input in pagination context detected. Allowing webhook to handle it.`);
+        return createResponse('pagination_selection', {}, null, 'numeric-context');
+      }
+      
       const commandKey = lowerMessage.trim();
       if (FEATURE_COMMANDS[commandKey]) {
         return createResponse(FEATURE_COMMANDS[commandKey].intent, {}, null, 'numeric');
+      }
+    }
+
+    // If user is in pagination context, only allow navigation commands (next, prev, back, etc.)
+    // Otherwise, ANY keyword match will interrupt the pagination flow
+    if (isInPaginationContext) {
+      const navigationKeywords = ['next', 'prev', 'previous', 'back', 'cancel', 'exit', 'stop'];
+      const isNavigationCommand = navigationKeywords.some(kw => lowerMessage.includes(kw));
+      
+      if (!isNavigationCommand) {
+        console.log(`⚠️  NLP: User in pagination context (${Object.keys({
+          doctorSpecialtyPagination: session.data.doctorSpecialtyPagination || false,
+          doctorPagination: session.data.doctorPagination || false,
+          productPagination: session.data.productPagination || false,
+          cartPagination: session.data.cartPagination || false
+        }).filter(k => session.data[k]).join(', ')}). Ignoring intent and returning pagination_selection.`);
+        return createResponse('pagination_selection', {}, null, 'pagination-context');
       }
     }
 
@@ -142,15 +173,25 @@ const processMessage = async (message, phoneNumber, session) => {
       return handleLoginIntent(message);
     }
 
-    // Product search intents
-    if (/^(search|find|show|look for|do you have|give me|send me).*?(medicine|drug|product|medication|pill|tablet)/.test(lowerMessage) ||
-        /^(medicine|drug|product|medication|pill|tablet)/.test(lowerMessage) ||
+    // ⚠️ CRITICAL: Doctor search intents MUST BE FIRST to prevent "look for doctor" being misclassified as product search
+    // This pattern is now more specific to avoid catching phrases like "add product..."
+    if (/\b(doctor|physician|specialist|cardiologist|pediatrician|dermatologist|gynecologist|neurologist|orthopedic)\b/i.test(lowerMessage) ||
+        /^(find|search|need|look for|consult).*?(doctor|physician|specialist)/i.test(lowerMessage) ||
+        lowerMessage === '2') {
+      return handleDoctorSearchIntent(message);
+    }
+
+    // Product search intents - ONLY check after doctor search confirmed as negative
+    // This now correctly handles "search for [product name]"
+    if (/\b(medicine|drug|medication|pill|tablet|paracetamol|aspirin|ibuprofen|amoxicillin|insulin|antibiotic|vaccine|panadol)\b/.test(lowerMessage) ||
+        (/^(search|find|show|look|give|send).*?(medicine|drug|product|medication|pill|tablet)/i.test(lowerMessage) && !/\b(doctor|physician|specialist|cardiologist|pediatrician|dermatologist)\b/i.test(lowerMessage)) ||
         lowerMessage === '1') {
       return handleProductSearchIntent(message);
     }
 
     // Add to cart intents
-    if (/^(add|put|move).*?(cart|basket)/.test(lowerMessage) || /^(add)\s+\d+(?:\s+\d+)?$/.test(lowerMessage)) {
+    // Enhanced to capture "add [product name] [quantity]"
+    if (/^(add|put|move).*?(cart|basket)/.test(lowerMessage) || /^(add)\s+([\w\s]+?)(?:\s+(?:qty|quantity))?\s*(\d+)?$/i.test(lowerMessage) || /^(add)\s+\d+(?:\s+\d+)?$/.test(lowerMessage)) {
       return handleAddToCartIntent(message);
     }
 
@@ -163,13 +204,6 @@ const processMessage = async (message, phoneNumber, session) => {
     if (/^(track|where is|status of|check|trace|update on).*?(order|delivery|package)/.test(lowerMessage) ||
         lowerMessage === '3') {
       return handleTrackOrderIntent(message);
-    }
-
-    // Doctor search intents
-    if (/^(find|search|need|looking for|want to see|book|appointment with).*?(doctor|physician|specialist|cardiologist|pediatrician|dermatologist|gynecologist|neurologist|orthopedic)/.test(lowerMessage) ||
-        /^(doctor|physician|specialist)/.test(lowerMessage) ||
-        lowerMessage === '2') {
-      return handleDoctorSearchIntent(message);
     }
 
     // Appointment booking intents
@@ -195,19 +229,26 @@ const processMessage = async (message, phoneNumber, session) => {
     }
 
     // Diagnostic tests intents
-    if (/^(diagnostic|test|blood test|lab test|screening|check up|medical test)/.test(lowerMessage)) {
+    // NOTE: More specific pattern to avoid false positives with "test" as a verb
+    if (/^(diagnostic|screening|check up|blood test|lab test|medical test|covid test|malaria test|typhoid test|thyroid test)/.test(lowerMessage)) {
       return handleDiagnosticTestIntent(message);
     }
 
     // Healthcare products intents
-    if (/^(healthcare|health care|products|browse|equipment|devices|supplies)/.test(lowerMessage) ||
-        lowerMessage === '8') {
+    if (/^(healthcare|health care|health products|browse products|equipment|devices|supplies)/.test(lowerMessage) ||
+        lowerMessage === '8' || lowerMessage === 'browse health products') {
       return handleHealthcareProductIntent(message);
     }
 
     // Password reset intents
-    if (/^(forgot|reset|change|password)/.test(lowerMessage)) {
-      return createResponse('password_reset', {}, "I'll help you reset your password. Please provide your email address.");
+    if (/^(forgot|reset|change).*password/.test(lowerMessage)) {
+      const parameters = {};
+      const emailMatch = lowerMessage.match(/[\w.-]+@[\w.-]+\.\w+/);
+      if (emailMatch) {
+        parameters.email = emailMatch[0];
+      }
+      const fulfillmentText = parameters.email ? `Understood. Sending a password reset link to ${parameters.email}...` : "I can help with that. What's the email address for your account?";
+      return createResponse('password_reset', parameters, fulfillmentText);
     }
 
     // Prescription upload intents
@@ -352,13 +393,30 @@ const handleProductSearchIntent = (message) => {
 
 const handleAddToCartIntent = (message) => {
   const parameters = {};
-  const numbers = message.match(/\d+/g);
+  const lowerMessage = message.toLowerCase();
 
-  if (numbers && numbers.length >= 1) {
-    parameters.productIndex = numbers[0];
-    parameters.quantity = numbers.length >= 2 ? numbers[1] : '1';
+  // Match "add [product name] [quantity]" or "add [product name] quantity [quantity]"
+  const nameAndQtyMatch = lowerMessage.match(/add\s+(.+?)(?:\s+quantity|\s+qty)?\s+(\d+)/i);
+  if (nameAndQtyMatch) {
+    parameters.productName = nameAndQtyMatch[1].trim();
+    parameters.quantity = nameAndQtyMatch[2];
+  } else {
+    // Match "add [index] [quantity]"
+    const indexAndQtyMatch = lowerMessage.match(/add\s+(\d+)\s+(\d+)/);
+    if (indexAndQtyMatch) {
+      parameters.productIndex = indexAndQtyMatch[1];
+      parameters.quantity = indexAndQtyMatch[2];
+    } else {
+      // Fallback for "add [index]" (defaults quantity to 1)
+      const indexOnlyMatch = lowerMessage.match(/add\s+(\d+)/);
+      if (indexOnlyMatch) {
+        parameters.productIndex = indexOnlyMatch[1];
+        parameters.quantity = '1';
+      }
+    }
   }
 
+  console.log(`✓ Detected add_to_cart intent: productIndex=${parameters.productIndex}, quantity=${parameters.quantity}`);
   return createResponse('add_to_cart', parameters);
 };
 
@@ -504,15 +562,16 @@ const extractIntentFromMessage = (lowerMessage) => {
   const foundKeywords = extractKeywords(lowerMessage);
 
   // Determine intent based on found keywords
+  // CRITICAL: Check doctors FIRST to avoid "look for doctor" being misclassified
+  if (foundKeywords.doctors.length > 0) {
+    return createResponse('search_doctors', {});
+  }
+
   if (foundKeywords.products.length > 0) {
     const productName = lowerMessage.split(/\s+/).filter(word =>
       foundKeywords.products.includes(word)
     ).join(' ');
     return createResponse('search_products', { product: productName || undefined });
-  }
-
-  if (foundKeywords.doctors.length > 0) {
-    return createResponse('search_doctors', {});
   }
 
   if (foundKeywords.appointments.length > 0) {
@@ -579,8 +638,7 @@ const formatResponseWithOptions = (message, isLoggedIn) => {
 module.exports = {
   processMessage,
   formatResponseWithOptions,
-  FEATURE_COMMANDS,
   HELP_MESSAGE,
   fuzzyMatch,
-  extractKeywords
+  FEATURE_COMMANDS
 };
